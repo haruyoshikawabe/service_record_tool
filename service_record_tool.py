@@ -12,7 +12,7 @@ from tkinter import filedialog, messagebox
 
 TEMPLATE_SHEET = "Format"
 
-# 既存テンプレのセル配置（あなたの確定：A16）
+# 既存テンプレのセル配置（確定：A16）
 CELL_MAP = {
     "office": "B3",
     "date": "B4",
@@ -26,7 +26,7 @@ CELL_MAP = {
 }
 
 ATTEND_VALUE = "出席"
-ABSENT_SKIP_VALUE = "欠席時対応"  # テストケースNo.20
+ABSENT_SKIP_VALUE = "欠席時対応"
 
 # テストケースに合わせた固定メッセージ
 MSG_NOT_USERCASEDAILY = "userCaseDailyではありません。"
@@ -38,7 +38,7 @@ MSG_USER_NOT_SELECTED = "userCaseDailyが未選択です。"
 MSG_OUTDIR_NOT_SELECTED = "出力先が未選択です。"
 MSG_FILE_IN_USE = "ファイルにアクセスできません。別のプロセスが使用中です。"
 
-# テストケースNo.19の想定結果に寄せる（表記揺れもあるが、ここは合わせに行く）
+# テスト仕様書の文言に寄せる（テンプレ未検出）
 MSG_TEMPLATE_NOT_FOUND = "java.io.FileNotFoundException.Sample_Format.xlsx(指定されたファイルが見つかりません。)"
 
 
@@ -54,14 +54,12 @@ def is_csv(path: Path) -> bool:
 
 
 def looks_like_userCaseDaily(path: Path) -> bool:
-    name = path.name
-    return ("userCaseDaily" in name)
+    return "userCaseDaily" in path.name
 
 
 def looks_like_caseDaily(path: Path) -> bool:
+    # テスト仕様書は caseDaily と書いているが、実データは caseMonth の場合があるため許容
     name = path.name
-    # 現場で caseMonth_... という名前もあり得るが、テストケースは caseDaily を要求しているため
-    # まずは caseDaily を優先。必要なら "caseMonth" を許容に変える。
     return ("caseDaily" in name) or ("caseMonth" in name)
 
 
@@ -105,17 +103,19 @@ def parse_hhmm(s: str) -> Optional[Tuple[int, int]]:
     return (h, mi)
 
 
-def format_time_jp(start: str, end: str) -> str:
+def format_time_range_jp(start: str, end: str) -> str:
+    """
+    テスト仕様書：対応時間の表示が「○時○分～○時○分」になっていること
+    入力が HH:MM のときは必ず「H時MM分～H時MM分」に整形する。
+    """
     ps = parse_hhmm(start)
     pe = parse_hhmm(end)
     if not ps or not pe:
-        # 入力が HH:MM でない場合はそのまま “～” でつなぐ（落とさない）
-        start = (start or "").strip()
-        end = (end or "").strip()
-        return "" if (not start and not end) else f"{start}～{end}"
+        # 入力が想定外の場合は空（仕様が「表示されているか」なので、ここは無理に出さない）
+        return ""
+
     sh, sm = ps
     eh, em = pe
-    # テストケースNo.15の「"時"分～"時"分」に合わせる
     return f"{sh}時{sm:02d}分～{eh}時{em:02d}分"
 
 
@@ -126,7 +126,6 @@ def safe_sheet_name(name: str) -> str:
 
 
 def pick_date_column(daily_rows: List[Dict[str, str]]) -> str:
-    # userCaseDailyの日付列候補
     candidates = ["日付", "年月日", "支援実施日"]
     keys = list(daily_rows[0].keys())
     for c in candidates:
@@ -136,7 +135,6 @@ def pick_date_column(daily_rows: List[Dict[str, str]]) -> str:
 
 
 def pick_daily_note(daily: Dict[str, str]) -> str:
-    # userCaseDailyの備考列候補
     candidates = ["備考", "備考欄", "本人との連絡", "連絡", "連絡事項"]
     for c in candidates:
         v = (daily.get(c) or "").strip()
@@ -170,20 +168,17 @@ def normalize_method(raw: str) -> str:
 
 def format_contact_text(raw: str) -> str:
     """
-    テストケースNo.16対応：
+    テスト仕様書：本人との連絡（A16）
     - 時刻(HH:MM)単位で改行
     - 各行は「HH:MM 」＋本文
-    - 時刻の後ろ30文字以降は「・・・・」で省略表示
+    - 時刻の後ろ30文字以降は「・・・・」で省略
     """
     text = (raw or "").strip()
     if not text:
         return ""
 
-    # まず時刻トークンで分割（時刻を保持）
-    # 例: "10:35 xxx 11:10 yyy" -> ["", "10:35", " xxx ", "11:10", " yyy"]
     parts = re.split(r"(\b\d{1,2}:\d{2}\b)", text)
     if len(parts) == 1:
-        # 時刻が無い場合は全体を30文字省略ルールだけ適用
         body = text
         return (body[:30] + "・・・・") if len(body) > 30 else body
 
@@ -194,16 +189,13 @@ def format_contact_text(raw: str) -> str:
         if re.fullmatch(r"\b\d{1,2}:\d{2}\b", seg or ""):
             t = seg
             msg = (parts[i + 1] if i + 1 < len(parts) else "").strip()
-            # 30文字で省略
-            disp = msg
-            if len(disp) > 30:
-                disp = disp[:30] + "・・・・"
-            lines.append(f"{t} {disp}".rstrip())
+            if len(msg) > 30:
+                msg = msg[:30] + "・・・・"
+            lines.append(f"{t} {msg}".rstrip())
             i += 2
         else:
             i += 1
 
-    # 時刻ごとに改行
     return "\n".join([ln for ln in lines if ln])
 
 
@@ -227,7 +219,6 @@ def ask_paths() -> Tuple[Optional[Path], Optional[Path], Optional[Path]]:
     # caseDaily選択
     case_path_str = filedialog.askopenfilename(title="caseDailyを選択", filetypes=[("CSV", "*.*")])
     if not case_path_str:
-        # userは選んだがcaseは未選択
         messagebox.showerror("エラー", MSG_CASE_NOT_SELECTED)
         return None, None, None
     case_path = Path(case_path_str)
@@ -257,10 +248,8 @@ def ensure_same_month(user_path: Path, case_path: Path) -> None:
 
 
 def build_output_filename(case_rows: List[Dict[str, str]], yyyymm: Optional[str]) -> str:
-    # テストケースNo.6: ('名前'_'年月'_サービス支援記録.xlsx)
     name = (case_rows[0].get("氏名") or "").strip() or "名前未設定"
     if not yyyymm:
-        # 年月が取れない場合は先頭日付から生成
         d = normalize_date(case_rows[0].get("年月日", ""))
         m = re.match(r"^(\d{4})/(\d{1,2})", d)
         yyyymm = f"{m.group(1)}{int(m.group(2)):02d}" if m else "YYYYMM"
@@ -278,7 +267,7 @@ def generate(user_csv: Path, case_csv: Path, outdir: Path) -> Path:
     base = get_base_folder()
     template_path = load_template_or_fail(base)
 
-    # 月一致チェック（テストケースNo.9）
+    # 月一致チェック
     ensure_same_month(user_csv, case_csv)
 
     # CSV読み込み
@@ -293,9 +282,8 @@ def generate(user_csv: Path, case_csv: Path, outdir: Path) -> Path:
     out_name = build_output_filename(case_rows, yyyymm)
     out_path = outdir / out_name
 
-    # 上書き確認（テストケースNo.13）
+    # 上書き確認
     if out_path.exists():
-        # 表の文言に寄せる（引用符が独特だが、ここは日本語メッセージで揃える）
         msg = f"このフォルダーには’{out_name}’は存在します。上書きしますか？"
         if not messagebox.askyesno("確認", msg):
             raise RuntimeError("キャンセルしました。")
@@ -310,7 +298,7 @@ def generate(user_csv: Path, case_csv: Path, outdir: Path) -> Path:
         raise RuntimeError(f"テンプレに '{TEMPLATE_SHEET}' シートがありません。")
     tpl = wb[TEMPLATE_SHEET]
 
-    # Sampleシート削除（テストケースNo.18）
+    # Sampleシート削除
     if "Sample" in wb.sheetnames:
         del wb["Sample"]
 
@@ -326,11 +314,10 @@ def generate(user_csv: Path, case_csv: Path, outdir: Path) -> Path:
         if c not in case_rows[0]:
             raise RuntimeError(f"caseDailyに必須列がありません: {c}")
 
-    created = 0
     for r in case_rows:
         status = (r.get("出欠等", "") or "").strip()
 
-        # 出席のみ作る（テストケースNo.14/20）
+        # 出席のみ作る
         if status == ABSENT_SKIP_VALUE:
             continue
         if status != ATTEND_VALUE:
@@ -360,27 +347,24 @@ def generate(user_csv: Path, case_csv: Path, outdir: Path) -> Path:
         ws[CELL_MAP["date"]].value = date
         ws[CELL_MAP["user"]].value = r.get("氏名", "")
 
-        # 対応時間（テストケースNo.15）
-        ws[CELL_MAP["time"]].value = format_time_jp(r.get("実績開始時間", ""), r.get("実績終了時間", ""))
+        # ★対応時間：仕様「○時○分～○時○分」
+        ws[CELL_MAP["time"]].value = format_time_range_jp(r.get("実績開始時間", ""), r.get("実績終了時間", ""))
 
         ws[CELL_MAP["method"]].value = normalize_method(r.get("実績記録票備考欄", ""))
         ws[CELL_MAP["program"]].value = build_program(daily)
         ws[CELL_MAP["dayreport"]].value = r.get("日報", "")
 
-        # 体温（テストケースNo.17）
+        # 体温
         temp = (daily.get("体温", "") or "").strip()
         ws[CELL_MAP["temp"]].value = "未検温" if temp == "" else f"{temp}℃"
 
-        # 本人との連絡（テストケースNo.16）
-        # daily備考優先 → なければcase側備考
+        # 本人との連絡（A16）
         daily_note = pick_daily_note(daily)
         cm_note = (r.get("備考") or r.get("実績記録票備考欄") or "").strip()
         raw_contact = daily_note or cm_note
         ws[CELL_MAP["slack"]].value = format_contact_text(raw_contact)
 
-        created += 1
-
-    # 保存（テストケースNo.5/7/8）
+    # 保存
     try:
         wb.save(out_path)
     except PermissionError:
@@ -393,10 +377,8 @@ def main():
     root = tk.Tk()
     root.withdraw()
 
-    # ファイル未選択系（テストケースNo.10/11/12）
     user_path, case_path, outdir = ask_paths()
     if user_path is None and case_path is None and outdir is None:
-        # ask_paths内でエラー表示済み or キャンセル済み
         return
     if case_path is None:
         messagebox.showerror("エラー", MSG_CASE_NOT_SELECTED)
@@ -414,7 +396,6 @@ def main():
     except FileNotFoundError as e:
         messagebox.showerror("エラー", str(e))
     except ValueError as e:
-        # 月不一致など
         messagebox.showerror("エラー", str(e))
     except PermissionError as e:
         messagebox.showerror("エラー", str(e))
