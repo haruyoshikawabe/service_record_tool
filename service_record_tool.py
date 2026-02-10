@@ -17,7 +17,7 @@ CELL_MAP = {
     "program": "A9",
     "dayreport": "A11",
     "temp": "B13",
-    "slack": "B15",
+    "slack": "A16",  # ← 本人との連絡（A16）に出力
 }
 
 
@@ -89,12 +89,11 @@ def get_base_folder() -> Path:
 
 
 def find_template(base: Path) -> Path:
-    # xlsxだけに限定（あなたのテンプレがxlsxなので）
     templates = sorted(list(base.glob("*.xlsx")))
     if not templates:
         raise RuntimeError("テンプレxlsxが見つかりません。exeと同じフォルダにテンプレxlsxを置いてください。")
 
-    # Formatシートがあるものを優先
+    # Formatシートがあるものをテンプレとして採用
     for p in templates:
         try:
             wb_tmp = load_workbook(p)
@@ -103,14 +102,33 @@ def find_template(base: Path) -> Path:
         except Exception:
             continue
 
-    # xlsxはあるがFormatがない場合
     raise RuntimeError("xlsxは見つかりましたが、Formatシートが見つかりません。正しいテンプレxlsxを置いてください。")
+
+
+def pick_date_column(daily_rows: List[Dict[str, str]]) -> str:
+    # userCaseDailyの「日付」列は環境で揺れる可能性があるので、候補で探す
+    candidates = ["日付", "年月日", "支援実施日"]
+    keys = list(daily_rows[0].keys())
+    for c in candidates:
+        if c in keys:
+            return c
+    # 最後の手段：先頭列を日付扱い
+    return keys[0]
+
+
+def pick_daily_note(daily: Dict[str, str]) -> str:
+    # userCaseDailyの備考列名が揺れても拾えるように候補で探す
+    candidates = ["備考", "備考欄", "本人との連絡", "連絡", "連絡事項"]
+    for c in candidates:
+        v = (daily.get(c) or "").strip()
+        if v:
+            return v
+    return ""
 
 
 def main():
     base = get_base_folder()
 
-    # 入力ファイル検出（exeと同じフォルダ）
     template_path = find_template(base)
     case_files = sorted(base.glob("caseMonth_*.csv"))
     daily_files = sorted(base.glob("userCaseDaily_*.csv"))
@@ -135,20 +153,17 @@ def main():
     if not daily_rows:
         raise RuntimeError("userCaseDailyが空です。")
 
-    # userCaseDailyの日付列推定
-    date_col = "日付" if "日付" in daily_rows[0] else list(daily_rows[0].keys())[0]
+    date_col = pick_date_column(daily_rows)
 
     daily_by_date: Dict[str, Dict[str, str]] = {}
     for r in daily_rows:
         daily_by_date[normalize_date(r.get(date_col, ""))] = r
 
-    # テンプレ読み込み
     wb = load_workbook(template_path)
     if TEMPLATE_SHEET not in wb.sheetnames:
         raise RuntimeError(f"テンプレに '{TEMPLATE_SHEET}' シートがありません。")
     tpl = wb[TEMPLATE_SHEET]
 
-    # 必須列チェック（caseMonth）
     required = ["事業所名", "氏名", "年月日", "出欠等", "実績開始時間", "実績終了時間"]
     for c in required:
         if c not in case_rows[0]:
@@ -168,7 +183,6 @@ def main():
         sheet_base = f"{date.replace('/','')[:8]}_{(r.get('氏名','') or '').strip()}"
         sheet_name = safe_sheet_name(sheet_base)
 
-        # シート名衝突回避
         if sheet_name in wb.sheetnames:
             k = 2
             while True:
@@ -192,7 +206,11 @@ def main():
         temp = (daily.get("体温", "") or "").strip()
         ws[CELL_MAP["temp"]].value = "未検温" if temp == "" else f"{temp}℃"
 
-        slack = (r.get("備考") or r.get("実績記録票備考欄") or "").strip()
+        # 本人との連絡（A16）：userCaseDailyの備考を優先し、無ければcaseMonth側の備考
+        daily_note = pick_daily_note(daily)
+        cm_note = (r.get("備考") or r.get("実績記録票備考欄") or "").strip()
+        slack = daily_note or cm_note
+
         ws[CELL_MAP["slack"]].value = (slack[:1500] + "・・・・") if len(slack) > 1500 else slack
 
         created += 1
