@@ -1,7 +1,6 @@
 import csv
 import re
 import sys
-import math
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -11,8 +10,6 @@ from tkinter import filedialog, messagebox
 from openpyxl import load_workbook
 from openpyxl.styles import Alignment
 from openpyxl.utils.exceptions import InvalidFileException
-from openpyxl.utils import get_column_letter
-from openpyxl.worksheet.worksheet import Worksheet
 
 TEMPLATE_SHEET = "Format"
 
@@ -21,30 +18,37 @@ CELL_MAP = {
     "date": "B4",
     "user": "G4",
     "time": "B5",          # 対応時間
-    "method": "G5",        # 対応手段
+    "method": "G5",        # 対応手段（中央揃え）
     "program": "A9",
-    "dayreport": "A11",    # 事業所が行った支援内容：縦に広げる（行高自動調整）
+    "dayreport": "A11",    # A11：行高固定（350px相当）
     "temp": "B13",
-    "slack": "A16",        # 本人との連絡：縦に広げる（行高自動調整）
+    "slack": "A16",        # A16：行高固定（500px相当）
 }
 
 ATTEND_VALUE = "出席"
 ABSENT_SKIP_VALUE = "欠席時対応"
+
+# 行高指定（px）
+A11_HEIGHT_PX = 350
+A16_HEIGHT_PX = 500
 
 MSG_NOT_USERCASEDAILY = "userCaseDailyではありません。"
 MSG_NOT_CASEDAILY = "caseDailyではありません。"
 MSG_NOT_CSV = "csvファイルではありません。"
 MSG_MONTH_MISMATCH = "userCaseDailyとcaseDailyの日時が合いません。"
 MSG_CASE_NOT_SELECTED = "caseDailyが未選択です。"
-MSG_USER_NOT_SELECTED = "userCaseDailyが未選択です。"
 MSG_OUTDIR_NOT_SELECTED = "出力先が未選択です。"
 MSG_FILE_IN_USE = "ファイルにアクセスできません。別のプロセスが使用中です。"
 MSG_TEMPLATE_NOT_FOUND = "java.io.FileNotFoundException.Sample_Format.xlsx(指定されたファイルが見つかりません。)"
 
 
-# =========================
-# 基本ユーティリティ
-# =========================
+def px_to_points(px: float) -> float:
+    """
+    Excelの行高はポイント(pt)で管理される。
+    96dpi想定の一般的な換算：1px ≒ 0.75pt
+    """
+    return px * 0.75
+
 
 def get_base_folder() -> Path:
     # PyInstaller(onefile) 対策：exeのフォルダを基準
@@ -62,7 +66,6 @@ def looks_like_userCaseDaily(path: Path) -> bool:
 
 
 def looks_like_caseDaily(path: Path) -> bool:
-    # 実データが caseMonth の場合もあるので許容
     name = path.name
     return ("caseDaily" in name) or ("caseMonth" in name)
 
@@ -103,10 +106,7 @@ def safe_sheet_name(name: str) -> str:
     return name.strip()[:31]
 
 
-# =========================
-# 対応時間（○時○分～○時○分）
-# =========================
-
+# ===== 対応時間：「○時○分～○時○分」に寄せる =====
 def parse_time_flexible(s: str) -> Optional[Tuple[int, int]]:
     s = (s or "").strip()
     if not s:
@@ -149,21 +149,14 @@ def format_time_range_jp(start: str, end: str) -> str:
     if left and right:
         return f"{left}～{right}"
     return left or right
+# ===============================================
 
-
-# =========================
-# Sampleシート削除
-# =========================
 
 def remove_sample_sheets(wb) -> None:
     targets = [name for name in wb.sheetnames if "sample" in name.lower()]
     for name in targets:
         del wb[name]
 
-
-# =========================
-# userCaseDaily の日付・連絡欄
-# =========================
 
 def pick_date_column(daily_rows: List[Dict[str, str]]) -> str:
     candidates = ["日付", "年月日", "支援実施日"]
@@ -249,98 +242,30 @@ def format_contact_text(raw: str) -> str:
     return "\n".join([ln for ln in lines if ln])
 
 
-# =========================
-# 行高の自動調整（縦に広げる）
-# =========================
-
-def find_merged_range_for_cell(ws: Worksheet, cell_addr: str):
-    for mr in ws.merged_cells.ranges:
-        if cell_addr in mr:
-            return mr
-    return None
-
-
-def get_effective_width_chars(ws: Worksheet, cell_addr: str) -> float:
+def set_wrap_only(ws, addr: str, horizontal_default="left", vertical_default="top"):
     """
-    結合セルなら結合範囲の列幅合計、非結合なら当該列幅。
-    列幅は変更しない（取得のみ）。
+    列幅等は一切変更しない。
+    wrap_text だけオンにする（既存の揃えは極力維持）。
     """
-    col = re.sub(r"\d+", "", cell_addr)
-    mr = find_merged_range_for_cell(ws, cell_addr)
-
-    if mr is None:
-        w = ws.column_dimensions[col].width
-        return float(w) if w else 10.0
-
-    min_col, min_row, max_col, max_row = mr.bounds
-    total = 0.0
-    for c in range(min_col, max_col + 1):
-        letter = get_column_letter(c)
-        w = ws.column_dimensions[letter].width
-        total += float(w) if w else 10.0
-    return total
-
-
-def estimate_wrapped_lines(text: str, width_chars: float) -> int:
-    if text is None:
-        return 1
-    s = str(text)
-    if s == "":
-        return 1
-
-    width = max(int(width_chars) - 1, 1)
-    total_lines = 0
-    for line in s.splitlines():
-        total_lines += max(1, math.ceil(len(line) / width))
-    return max(total_lines, 1)
-
-
-def apply_wrap_and_autofit_row_height(
-    ws: Worksheet,
-    cell_addr: str,
-    text: str,
-    max_row_height: float = 120.0
-):
-    """
-    セルに値を入れ、wrap_text=True にし、必要なら行高を増やす。
-    ・フォントサイズは触らない（テンプレの12維持）
-    ・列幅や結合、印刷範囲には触らない
-    ・行高の上限 max_row_height を設け、印刷崩れを抑制
-    """
-    cell = ws[cell_addr]
-    cell.value = text
-
+    cell = ws[addr]
     a = cell.alignment if cell.alignment else Alignment()
-    cell.alignment = Alignment(
-        horizontal=a.horizontal if a.horizontal else "left",
-        vertical=a.vertical if a.vertical else "top",
+    ws[addr].alignment = Alignment(
+        horizontal=a.horizontal if a.horizontal else horizontal_default,
+        vertical=a.vertical if a.vertical else vertical_default,
         text_rotation=a.text_rotation,
         wrap_text=True,
         shrinkToFit=False,
         indent=a.indent,
     )
 
-    row = cell.row
-    base_h = ws.row_dimensions[row].height
-    if base_h is None:
-        base_h = 15.0
 
-    width_chars = get_effective_width_chars(ws, cell_addr)
-    lines = estimate_wrapped_lines(text, width_chars)
+def set_row_height_px(ws, addr: str, height_px: float):
+    """
+    指定セルの「行」の高さを px 指定（内部はpt換算）で固定。
+    """
+    row = ws[addr].row
+    ws.row_dimensions[row].height = px_to_points(height_px)
 
-    if lines <= 1:
-        return
-
-    new_h = min(base_h * lines, max_row_height)
-
-    cur_h = ws.row_dimensions[row].height
-    if cur_h is None or new_h > cur_h:
-        ws.row_dimensions[row].height = new_h
-
-
-# =========================
-# 入出力
-# =========================
 
 def ask_paths() -> Tuple[Optional[Path], Optional[Path], Optional[Path]]:
     root = tk.Tk()
@@ -430,6 +355,7 @@ def generate(user_csv: Path, case_csv: Path, outdir: Path) -> Path:
     except (InvalidFileException, Exception) as e:
         raise RuntimeError(f"テンプレ読み込み失敗: {e}")
 
+    # Sample系を削除
     remove_sample_sheets(wb)
 
     if TEMPLATE_SHEET not in wb.sheetnames:
@@ -477,37 +403,39 @@ def generate(user_csv: Path, case_csv: Path, outdir: Path) -> Path:
         ws[CELL_MAP["date"]].value = date
         ws[CELL_MAP["user"]].value = r.get("氏名", "")
 
+        # 対応時間
         ws[CELL_MAP["time"]].value = format_time_range_jp(
             r.get("実績開始時間", ""),
             r.get("実績終了時間", "")
         )
 
-        # G5：中央揃え
+        # 対応手段（G5）：中央揃え
         method_cell = ws[CELL_MAP["method"]]
         method_cell.value = normalize_method(r.get("実績記録票備考欄", ""))
         method_cell.alignment = Alignment(horizontal="center", vertical="center")
 
+        # プログラム
         ws[CELL_MAP["program"]].value = build_program(daily)
 
-        # A11：縦に広げる（行高自動調整）
-        apply_wrap_and_autofit_row_height(
-            ws, CELL_MAP["dayreport"], r.get("日報", ""), max_row_height=120.0
-        )
+        # A11：値入力＋wrap（横はテンプレ通り）＋行高固定350px
+        ws[CELL_MAP["dayreport"]].value = r.get("日報", "")
+        set_wrap_only(ws, CELL_MAP["dayreport"], horizontal_default="left", vertical_default="top")
+        set_row_height_px(ws, CELL_MAP["dayreport"], A11_HEIGHT_PX)
 
         # 体温
         temp = (daily.get("体温", "") or "").strip()
         ws[CELL_MAP["temp"]].value = "未検温" if temp == "" else f"{temp}℃"
 
-        # A16：userCaseDaily の備考（Y列相当）は使わない
+        # A16：userCaseDaily備考（Y列相当）は使わない
         daily_contact = pick_daily_contact_only(daily)  # 連絡専用列のみ
         cm_note = (r.get("備考") or r.get("実績記録票備考欄") or "").strip()  # case側
         raw_contact = daily_contact or cm_note
 
-        # A16：縦に広げる（行高自動調整）
-        apply_wrap_and_autofit_row_height(
-            ws, CELL_MAP["slack"], format_contact_text(raw_contact), max_row_height=120.0
-        )
+        ws[CELL_MAP["slack"]].value = format_contact_text(raw_contact)
+        set_wrap_only(ws, CELL_MAP["slack"], horizontal_default="left", vertical_default="top")
+        set_row_height_px(ws, CELL_MAP["slack"], A16_HEIGHT_PX)
 
+    # 念のため最後にもSample系削除
     remove_sample_sheets(wb)
 
     try:
