@@ -11,7 +11,7 @@ from tkinter import filedialog, messagebox
 from openpyxl import load_workbook
 from openpyxl.styles import Alignment
 from openpyxl.utils.exceptions import InvalidFileException
-from openpyxl.utils import get_column_letter, column_index_from_string
+from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.worksheet import Worksheet
 
 TEMPLATE_SHEET = "Format"
@@ -20,12 +20,12 @@ CELL_MAP = {
     "office": "B3",
     "date": "B4",
     "user": "G4",
-    "time": "B5",
-    "method": "G5",
+    "time": "B5",          # 対応時間
+    "method": "G5",        # 対応手段
     "program": "A9",
-    "dayreport": "A11",  # フォント12維持、行高のみ必要に応じて増やす
+    "dayreport": "A11",    # 事業所が行った支援内容：縦に広げる（行高自動調整）
     "temp": "B13",
-    "slack": "A16",      # フォント12維持、行高のみ必要に応じて増やす
+    "slack": "A16",        # 本人との連絡：縦に広げる（行高自動調整）
 }
 
 ATTEND_VALUE = "出席"
@@ -47,6 +47,7 @@ MSG_TEMPLATE_NOT_FOUND = "java.io.FileNotFoundException.Sample_Format.xlsx(指�
 # =========================
 
 def get_base_folder() -> Path:
+    # PyInstaller(onefile) 対策：exeのフォルダを基準
     if getattr(sys, "frozen", False):
         return Path(sys.executable).resolve().parent
     return Path(__file__).resolve().parent
@@ -61,6 +62,7 @@ def looks_like_userCaseDaily(path: Path) -> bool:
 
 
 def looks_like_caseDaily(path: Path) -> bool:
+    # 実データが caseMonth の場合もあるので許容
     name = path.name
     return ("caseDaily" in name) or ("caseMonth" in name)
 
@@ -174,7 +176,7 @@ def pick_date_column(daily_rows: List[Dict[str, str]]) -> str:
 
 def pick_daily_contact_only(daily: Dict[str, str]) -> str:
     """
-    A16に userCaseDaily の「備考」（Y列相当）が混ざるのを防ぐ。
+    A16 に userCaseDaily の「備考」（Y列相当）が混ざるのを防ぐ。
     連絡専用列だけ拾う。備考/備考欄は絶対に使わない。
     """
     candidates = [
@@ -248,7 +250,7 @@ def format_contact_text(raw: str) -> str:
 
 
 # =========================
-# 行高の自動調整（テンプレ形状は変えない）
+# 行高の自動調整（縦に広げる）
 # =========================
 
 def find_merged_range_for_cell(ws: Worksheet, cell_addr: str):
@@ -261,7 +263,7 @@ def find_merged_range_for_cell(ws: Worksheet, cell_addr: str):
 def get_effective_width_chars(ws: Worksheet, cell_addr: str) -> float:
     """
     結合セルなら結合範囲の列幅合計、非結合なら当該列幅。
-    列幅は変更しない。取得だけ。
+    列幅は変更しない（取得のみ）。
     """
     col = re.sub(r"\d+", "", cell_addr)
     mr = find_merged_range_for_cell(ws, cell_addr)
@@ -280,10 +282,6 @@ def get_effective_width_chars(ws: Worksheet, cell_addr: str) -> float:
 
 
 def estimate_wrapped_lines(text: str, width_chars: float) -> int:
-    """
-    wrap_text=True 前提で、概算の行数を出す。
-    改行は尊重し、各行を width_chars で割る。
-    """
     if text is None:
         return 1
     s = str(text)
@@ -292,9 +290,8 @@ def estimate_wrapped_lines(text: str, width_chars: float) -> int:
 
     width = max(int(width_chars) - 1, 1)
     total_lines = 0
-    for line in s.splitlines() if "\n" in s else s.split("\r\n"):
-        ln = line if line is not None else ""
-        total_lines += max(1, math.ceil(len(ln) / width))
+    for line in s.splitlines():
+        total_lines += max(1, math.ceil(len(line) / width))
     return max(total_lines, 1)
 
 
@@ -306,25 +303,23 @@ def apply_wrap_and_autofit_row_height(
 ):
     """
     セルに値を入れ、wrap_text=True にし、必要なら行高を増やす。
-    ・フォントサイズは触らない（=テンプレの12を維持）
+    ・フォントサイズは触らない（テンプレの12維持）
     ・列幅や結合、印刷範囲には触らない
     ・行高の上限 max_row_height を設け、印刷崩れを抑制
     """
     cell = ws[cell_addr]
     cell.value = text
 
-    # 既存の揃えをなるべく維持しつつ、wrapだけオンにする
     a = cell.alignment if cell.alignment else Alignment()
     cell.alignment = Alignment(
-        horizontal=a.horizontal,
-        vertical=a.vertical,
+        horizontal=a.horizontal if a.horizontal else "left",
+        vertical=a.vertical if a.vertical else "top",
         text_rotation=a.text_rotation,
         wrap_text=True,
         shrinkToFit=False,
         indent=a.indent,
     )
 
-    # テンプレの既定行高をベースにする（未設定ならExcel標準15）
     row = cell.row
     base_h = ws.row_dimensions[row].height
     if base_h is None:
@@ -333,14 +328,13 @@ def apply_wrap_and_autofit_row_height(
     width_chars = get_effective_width_chars(ws, cell_addr)
     lines = estimate_wrapped_lines(text, width_chars)
 
-    # 1行なら現状維持。2行以上なら行高を増やす
     if lines <= 1:
         return
 
     new_h = min(base_h * lines, max_row_height)
 
-    # 元の行高より小さくしない（テンプレを壊さない）
-    if ws.row_dimensions[row].height is None or new_h > ws.row_dimensions[row].height:
+    cur_h = ws.row_dimensions[row].height
+    if cur_h is None or new_h > cur_h:
         ws.row_dimensions[row].height = new_h
 
 
@@ -495,7 +489,7 @@ def generate(user_csv: Path, case_csv: Path, outdir: Path) -> Path:
 
         ws[CELL_MAP["program"]].value = build_program(daily)
 
-        # A11：フォントは触らず、wrap＋必要なら行高増
+        # A11：縦に広げる（行高自動調整）
         apply_wrap_and_autofit_row_height(
             ws, CELL_MAP["dayreport"], r.get("日報", ""), max_row_height=120.0
         )
@@ -509,7 +503,7 @@ def generate(user_csv: Path, case_csv: Path, outdir: Path) -> Path:
         cm_note = (r.get("備考") or r.get("実績記録票備考欄") or "").strip()  # case側
         raw_contact = daily_contact or cm_note
 
-        # A16：フォントは触らず、wrap＋必要なら行高増
+        # A16：縦に広げる（行高自動調整）
         apply_wrap_and_autofit_row_height(
             ws, CELL_MAP["slack"], format_contact_text(raw_contact), max_row_height=120.0
         )
