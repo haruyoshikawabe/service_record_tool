@@ -1,9 +1,9 @@
 import csv
 import re
 import sys
-import math
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
+from copy import copy
 
 import tkinter as tk
 from tkinter import filedialog, messagebox
@@ -11,8 +11,6 @@ from tkinter import filedialog, messagebox
 from openpyxl import load_workbook
 from openpyxl.styles import Alignment
 from openpyxl.utils.exceptions import InvalidFileException
-from openpyxl.utils import get_column_letter, column_index_from_string
-from openpyxl.worksheet.worksheet import Worksheet
 
 TEMPLATE_SHEET = "Format"
 
@@ -23,9 +21,9 @@ CELL_MAP = {
     "time": "B5",
     "method": "G5",
     "program": "A9",
-    "dayreport": "A11",  # ←全文表示（行高自動計算）
+    "dayreport": "A11",  # A11: フォントサイズを8固定
     "temp": "B13",
-    "slack": "A16",      # ←全文表示（行高自動計算）
+    "slack": "A16",      # A16: フォントサイズを8固定
 }
 
 ATTEND_VALUE = "出席"
@@ -40,10 +38,6 @@ MSG_OUTDIR_NOT_SELECTED = "出力先が未選択です。"
 MSG_FILE_IN_USE = "ファイルにアクセスできません。別のプロセスが使用中です。"
 MSG_TEMPLATE_NOT_FOUND = "java.io.FileNotFoundException.Sample_Format.xlsx(指定されたファイルが見つかりません。)"
 
-
-# ---------------------------
-# Excel表示用ユーティリティ
-# ---------------------------
 
 def get_base_folder() -> Path:
     if getattr(sys, "frozen", False):
@@ -94,17 +88,14 @@ def normalize_date(s: str) -> str:
     return (s or "").strip().replace("-", "/")
 
 
-# ---------------------------
-# 対応時間（○時○分～○時○分）
-# ---------------------------
-
+# ===== 対応時間：「○時○分～○時○分」に寄せる =====
 def parse_time_flexible(s: str) -> Optional[Tuple[int, int]]:
     s = (s or "").strip()
     if not s:
         return None
 
     patterns = [
-        r"(\d{1,2}):(\d{2})(?::\d{2})?",  # 09:30, 09:30:00
+        r"(\d{1,2}):(\d{2})(?::\d{2})?",
         r"(\d{1,2})時(\d{1,2})分",
     ]
     for pat in patterns:
@@ -120,6 +111,7 @@ def parse_time_flexible(s: str) -> Optional[Tuple[int, int]]:
 def format_time_range_jp(start: str, end: str) -> str:
     ps = parse_time_flexible(start)
     pe = parse_time_flexible(end)
+
     if ps and pe:
         sh, sm = ps
         eh, em = pe
@@ -133,87 +125,14 @@ def format_time_range_jp(start: str, end: str) -> str:
 
     left = fmt_one(ps, start)
     right = fmt_one(pe, end)
+
     if not left and not right:
         return ""
     if left and right:
         return f"{left}～{right}"
     return left or right
+# ===============================================
 
-
-# ---------------------------
-# 「全文表示」用：結合範囲幅を見て行高を計算して設定
-# ---------------------------
-
-def find_merged_range_for_cell(ws: Worksheet, cell_addr: str):
-    for mr in ws.merged_cells.ranges:
-        if cell_addr in mr:
-            return mr  # e.g. 'A11:J11'
-    return None
-
-
-def get_effective_width_chars(ws: Worksheet, cell_addr: str) -> float:
-    """
-    結合セルの場合：結合範囲の列幅合計
-    非結合：その列幅
-    Excel列幅は「だいたい文字数」に近いので、それを使って概算する。
-    """
-    col = re.sub(r"\d+", "", cell_addr)
-    col_idx = column_index_from_string(col)
-
-    mr = find_merged_range_for_cell(ws, cell_addr)
-    if mr is None:
-        w = ws.column_dimensions[col].width
-        return float(w) if w else 10.0
-
-    # 結合範囲の左端～右端列の幅を合算
-    min_col, min_row, max_col, max_row = mr.bounds
-    total = 0.0
-    for c in range(min_col, max_col + 1):
-        letter = get_column_letter(c)
-        w = ws.column_dimensions[letter].width
-        total += float(w) if w else 10.0
-    return total
-
-
-def estimate_wrapped_lines(text: str, width_chars: float) -> int:
-    """
-    wrap_text=True の時に何行になるかを概算。
-    既存改行は尊重し、各行を width_chars で折り返すと仮定。
-    """
-    if not text:
-        return 1
-    width = max(int(width_chars) - 1, 1)  # 余裕を少し引く
-    lines = 0
-    for para in str(text).splitlines() if "\n" in str(text) else str(text).split("\r\n"):
-        p = para if para is not None else ""
-        # 日本語は単語境界が弱いので「文字数」で割る
-        n = max(1, math.ceil(len(p) / width))
-        lines += n
-    return max(lines, 1)
-
-
-def set_full_display(ws: Worksheet, cell_addr: str, text: str, base_row_height: float = 15.0,
-                     max_row_height: float = 409.0):
-    """
-    セルにテキストを入れ、wrap_text=True にして、行高を計算して伸ばす。
-    """
-    cell = ws[cell_addr]
-    cell.value = text
-
-    # shrinkToFit は使わない（wrapと衝突しやすい）
-    cell.alignment = Alignment(horizontal="left", vertical="top", wrap_text=True)
-
-    width_chars = get_effective_width_chars(ws, cell_addr)
-    lines = estimate_wrapped_lines(text, width_chars)
-
-    row = cell.row
-    new_h = min(max(base_row_height * lines, base_row_height), max_row_height)
-    ws.row_dimensions[row].height = new_h
-
-
-# ---------------------------
-# その他
-# ---------------------------
 
 def safe_sheet_name(name: str) -> str:
     for c in [":", "/", "\\", "?", "*", "[", "]"]:
@@ -263,12 +182,6 @@ def normalize_method(raw: str) -> str:
 
 
 def format_contact_text(raw: str) -> str:
-    """
-    本人との連絡（A16）
-    - 時刻(HH:MM)単位で改行
-    - 各行は「HH:MM 」＋本文
-    - 本文は30文字以降を「・・・・」で省略
-    """
     text = (raw or "").strip()
     if not text:
         return ""
@@ -362,6 +275,18 @@ def load_template_or_fail(base: Path) -> Path:
     return tpl
 
 
+def set_font_size_only(ws, addr: str, size: int):
+    """
+    テンプレの形は変えず、フォントサイズだけ変更する。
+    （太字・色・フォント名などは保持）
+    """
+    c = ws[addr]
+    f = c.font
+    nf = copy(f)
+    nf.size = size
+    c.font = nf
+
+
 def generate(user_csv: Path, case_csv: Path, outdir: Path) -> Path:
     base = get_base_folder()
     template_path = load_template_or_fail(base)
@@ -441,25 +366,26 @@ def generate(user_csv: Path, case_csv: Path, outdir: Path) -> Path:
             r.get("実績終了時間", "")
         )
 
-        # G5：中央揃え
         method_cell = ws[CELL_MAP["method"]]
         method_cell.value = normalize_method(r.get("実績記録票備考欄", ""))
         method_cell.alignment = Alignment(horizontal="center", vertical="center")
 
         ws[CELL_MAP["program"]].value = build_program(daily)
 
-        # A11：全文表示（wrap + 行高自動計算）
-        set_full_display(ws, CELL_MAP["dayreport"], r.get("日報", ""))
+        # A11：値を入れて、フォントサイズだけ 12→8
+        ws[CELL_MAP["dayreport"]].value = r.get("日報", "")
+        set_font_size_only(ws, CELL_MAP["dayreport"], 8)
 
-        # 体温
         temp = (daily.get("体温", "") or "").strip()
         ws[CELL_MAP["temp"]].value = "未検温" if temp == "" else f"{temp}℃"
 
-        # A16：全文表示（wrap + 行高自動計算）
         daily_note = pick_daily_note(daily)
         cm_note = (r.get("備考") or r.get("実績記録票備考欄") or "").strip()
         raw_contact = daily_note or cm_note
-        set_full_display(ws, CELL_MAP["slack"], format_contact_text(raw_contact))
+
+        # A16：値を入れて、フォントサイズだけ 12→8
+        ws[CELL_MAP["slack"]].value = format_contact_text(raw_contact)
+        set_font_size_only(ws, CELL_MAP["slack"], 8)
 
     remove_sample_sheets(wb)
 
