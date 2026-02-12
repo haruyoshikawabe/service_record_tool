@@ -23,7 +23,7 @@ CELL_MAP = {
     "program": "A9",
     "dayreport": "A11",  # A11: フォントサイズを8固定
     "temp": "B13",
-    "slack": "A16",      # A16: フォントサイズを8固定
+    "slack": "A16",      # A16: フォントサイズを8固定（userCaseDaily備考は使わない）
 }
 
 ATTEND_VALUE = "出席"
@@ -34,6 +34,7 @@ MSG_NOT_CASEDAILY = "caseDailyではありません。"
 MSG_NOT_CSV = "csvファイルではありません。"
 MSG_MONTH_MISMATCH = "userCaseDailyとcaseDailyの日時が合いません。"
 MSG_CASE_NOT_SELECTED = "caseDailyが未選択です。"
+MSG_USER_NOT_SELECTED = "userCaseDailyが未選択です。"
 MSG_OUTDIR_NOT_SELECTED = "出力先が未選択です。"
 MSG_FILE_IN_USE = "ファイルにアクセスできません。別のプロセスが使用中です。"
 MSG_TEMPLATE_NOT_FOUND = "java.io.FileNotFoundException.Sample_Format.xlsx(指定されたファイルが見つかりません。)"
@@ -150,7 +151,19 @@ def pick_date_column(daily_rows: List[Dict[str, str]]) -> str:
 
 
 def pick_daily_note(daily: Dict[str, str]) -> str:
-    candidates = ["備考", "備考欄", "本人との連絡", "連絡", "連絡事項"]
+    """
+    A16（本人との連絡）に userCaseDaily の「備考」（Y列相当）が混入するのを防ぐため、
+    userCaseDaily の「備考」「備考欄」は絶対に使わない。
+
+    ここで拾うのは “連絡専用” と見なせる列だけ。
+    """
+    candidates = [
+        "本人との連絡",
+        "本人との連絡（チャット）",
+        "本人との連絡（Slack）",
+        "連絡事項",
+        "連絡",
+    ]
     for c in candidates:
         v = (daily.get(c) or "").strip()
         if v:
@@ -182,6 +195,12 @@ def normalize_method(raw: str) -> str:
 
 
 def format_contact_text(raw: str) -> str:
+    """
+    本人との連絡（A16）
+    - 時刻(HH:MM)単位で改行
+    - 各行は「HH:MM 」＋本文
+    - 本文は30文字以降を「・・・・」で省略
+    """
     text = (raw or "").strip()
     if not text:
         return ""
@@ -379,11 +398,11 @@ def generate(user_csv: Path, case_csv: Path, outdir: Path) -> Path:
         temp = (daily.get("体温", "") or "").strip()
         ws[CELL_MAP["temp"]].value = "未検温" if temp == "" else f"{temp}℃"
 
-        daily_note = pick_daily_note(daily)
-        cm_note = (r.get("備考") or r.get("実績記録票備考欄") or "").strip()
+        # A16：userCaseDaily の備考（Y列相当）は使わない
+        daily_note = pick_daily_note(daily)  # 連絡専用列のみ拾う
+        cm_note = (r.get("備考") or r.get("実績記録票備考欄") or "").strip()  # caseDaily側
         raw_contact = daily_note or cm_note
 
-        # A16：値を入れて、フォントサイズだけ 12→8
         ws[CELL_MAP["slack"]].value = format_contact_text(raw_contact)
         set_font_size_only(ws, CELL_MAP["slack"], 8)
 
