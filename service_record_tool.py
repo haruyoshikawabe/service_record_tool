@@ -1,9 +1,9 @@
 import csv
 import re
 import sys
+import math
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
-from copy import copy
 
 import tkinter as tk
 from tkinter import filedialog, messagebox
@@ -11,6 +11,8 @@ from tkinter import filedialog, messagebox
 from openpyxl import load_workbook
 from openpyxl.styles import Alignment
 from openpyxl.utils.exceptions import InvalidFileException
+from openpyxl.utils import get_column_letter, column_index_from_string
+from openpyxl.worksheet.worksheet import Worksheet
 
 TEMPLATE_SHEET = "Format"
 
@@ -21,9 +23,9 @@ CELL_MAP = {
     "time": "B5",
     "method": "G5",
     "program": "A9",
-    "dayreport": "A11",  # A11: フォントサイズを8固定
+    "dayreport": "A11",  # フォント12維持、行高のみ必要に応じて増やす
     "temp": "B13",
-    "slack": "A16",      # A16: フォントサイズを8固定（userCaseDaily備考は使わない）
+    "slack": "A16",      # フォント12維持、行高のみ必要に応じて増やす
 }
 
 ATTEND_VALUE = "出席"
@@ -39,6 +41,10 @@ MSG_OUTDIR_NOT_SELECTED = "出力先が未選択です。"
 MSG_FILE_IN_USE = "ファイルにアクセスできません。別のプロセスが使用中です。"
 MSG_TEMPLATE_NOT_FOUND = "java.io.FileNotFoundException.Sample_Format.xlsx(指定されたファイルが見つかりません。)"
 
+
+# =========================
+# 基本ユーティリティ
+# =========================
 
 def get_base_folder() -> Path:
     if getattr(sys, "frozen", False):
@@ -89,7 +95,16 @@ def normalize_date(s: str) -> str:
     return (s or "").strip().replace("-", "/")
 
 
-# ===== 対応時間：「○時○分～○時○分」に寄せる =====
+def safe_sheet_name(name: str) -> str:
+    for c in [":", "/", "\\", "?", "*", "[", "]"]:
+        name = name.replace(c, "_")
+    return name.strip()[:31]
+
+
+# =========================
+# 対応時間（○時○分～○時○分）
+# =========================
+
 def parse_time_flexible(s: str) -> Optional[Tuple[int, int]]:
     s = (s or "").strip()
     if not s:
@@ -132,14 +147,21 @@ def format_time_range_jp(start: str, end: str) -> str:
     if left and right:
         return f"{left}～{right}"
     return left or right
-# ===============================================
 
 
-def safe_sheet_name(name: str) -> str:
-    for c in [":", "/", "\\", "?", "*", "[", "]"]:
-        name = name.replace(c, "_")
-    return name.strip()[:31]
+# =========================
+# Sampleシート削除
+# =========================
 
+def remove_sample_sheets(wb) -> None:
+    targets = [name for name in wb.sheetnames if "sample" in name.lower()]
+    for name in targets:
+        del wb[name]
+
+
+# =========================
+# userCaseDaily の日付・連絡欄
+# =========================
 
 def pick_date_column(daily_rows: List[Dict[str, str]]) -> str:
     candidates = ["日付", "年月日", "支援実施日"]
@@ -150,12 +172,10 @@ def pick_date_column(daily_rows: List[Dict[str, str]]) -> str:
     return keys[0]
 
 
-def pick_daily_note(daily: Dict[str, str]) -> str:
+def pick_daily_contact_only(daily: Dict[str, str]) -> str:
     """
-    A16（本人との連絡）に userCaseDaily の「備考」（Y列相当）が混入するのを防ぐため、
-    userCaseDaily の「備考」「備考欄」は絶対に使わない。
-
-    ここで拾うのは “連絡専用” と見なせる列だけ。
+    A16に userCaseDaily の「備考」（Y列相当）が混ざるのを防ぐ。
+    連絡専用列だけ拾う。備考/備考欄は絶対に使わない。
     """
     candidates = [
         "本人との連絡",
@@ -227,11 +247,106 @@ def format_contact_text(raw: str) -> str:
     return "\n".join([ln for ln in lines if ln])
 
 
-def remove_sample_sheets(wb) -> None:
-    targets = [name for name in wb.sheetnames if "sample" in name.lower()]
-    for name in targets:
-        del wb[name]
+# =========================
+# 行高の自動調整（テンプレ形状は変えない）
+# =========================
 
+def find_merged_range_for_cell(ws: Worksheet, cell_addr: str):
+    for mr in ws.merged_cells.ranges:
+        if cell_addr in mr:
+            return mr
+    return None
+
+
+def get_effective_width_chars(ws: Worksheet, cell_addr: str) -> float:
+    """
+    結合セルなら結合範囲の列幅合計、非結合なら当該列幅。
+    列幅は変更しない。取得だけ。
+    """
+    col = re.sub(r"\d+", "", cell_addr)
+    mr = find_merged_range_for_cell(ws, cell_addr)
+
+    if mr is None:
+        w = ws.column_dimensions[col].width
+        return float(w) if w else 10.0
+
+    min_col, min_row, max_col, max_row = mr.bounds
+    total = 0.0
+    for c in range(min_col, max_col + 1):
+        letter = get_column_letter(c)
+        w = ws.column_dimensions[letter].width
+        total += float(w) if w else 10.0
+    return total
+
+
+def estimate_wrapped_lines(text: str, width_chars: float) -> int:
+    """
+    wrap_text=True 前提で、概算の行数を出す。
+    改行は尊重し、各行を width_chars で割る。
+    """
+    if text is None:
+        return 1
+    s = str(text)
+    if s == "":
+        return 1
+
+    width = max(int(width_chars) - 1, 1)
+    total_lines = 0
+    for line in s.splitlines() if "\n" in s else s.split("\r\n"):
+        ln = line if line is not None else ""
+        total_lines += max(1, math.ceil(len(ln) / width))
+    return max(total_lines, 1)
+
+
+def apply_wrap_and_autofit_row_height(
+    ws: Worksheet,
+    cell_addr: str,
+    text: str,
+    max_row_height: float = 120.0
+):
+    """
+    セルに値を入れ、wrap_text=True にし、必要なら行高を増やす。
+    ・フォントサイズは触らない（=テンプレの12を維持）
+    ・列幅や結合、印刷範囲には触らない
+    ・行高の上限 max_row_height を設け、印刷崩れを抑制
+    """
+    cell = ws[cell_addr]
+    cell.value = text
+
+    # 既存の揃えをなるべく維持しつつ、wrapだけオンにする
+    a = cell.alignment if cell.alignment else Alignment()
+    cell.alignment = Alignment(
+        horizontal=a.horizontal,
+        vertical=a.vertical,
+        text_rotation=a.text_rotation,
+        wrap_text=True,
+        shrinkToFit=False,
+        indent=a.indent,
+    )
+
+    # テンプレの既定行高をベースにする（未設定ならExcel標準15）
+    row = cell.row
+    base_h = ws.row_dimensions[row].height
+    if base_h is None:
+        base_h = 15.0
+
+    width_chars = get_effective_width_chars(ws, cell_addr)
+    lines = estimate_wrapped_lines(text, width_chars)
+
+    # 1行なら現状維持。2行以上なら行高を増やす
+    if lines <= 1:
+        return
+
+    new_h = min(base_h * lines, max_row_height)
+
+    # 元の行高より小さくしない（テンプレを壊さない）
+    if ws.row_dimensions[row].height is None or new_h > ws.row_dimensions[row].height:
+        ws.row_dimensions[row].height = new_h
+
+
+# =========================
+# 入出力
+# =========================
 
 def ask_paths() -> Tuple[Optional[Path], Optional[Path], Optional[Path]]:
     root = tk.Tk()
@@ -292,18 +407,6 @@ def load_template_or_fail(base: Path) -> Path:
     if not tpl.exists():
         raise FileNotFoundError(MSG_TEMPLATE_NOT_FOUND)
     return tpl
-
-
-def set_font_size_only(ws, addr: str, size: int):
-    """
-    テンプレの形は変えず、フォントサイズだけ変更する。
-    （太字・色・フォント名などは保持）
-    """
-    c = ws[addr]
-    f = c.font
-    nf = copy(f)
-    nf.size = size
-    c.font = nf
 
 
 def generate(user_csv: Path, case_csv: Path, outdir: Path) -> Path:
@@ -385,26 +488,31 @@ def generate(user_csv: Path, case_csv: Path, outdir: Path) -> Path:
             r.get("実績終了時間", "")
         )
 
+        # G5：中央揃え
         method_cell = ws[CELL_MAP["method"]]
         method_cell.value = normalize_method(r.get("実績記録票備考欄", ""))
         method_cell.alignment = Alignment(horizontal="center", vertical="center")
 
         ws[CELL_MAP["program"]].value = build_program(daily)
 
-        # A11：値を入れて、フォントサイズだけ 12→8
-        ws[CELL_MAP["dayreport"]].value = r.get("日報", "")
-        set_font_size_only(ws, CELL_MAP["dayreport"], 8)
+        # A11：フォントは触らず、wrap＋必要なら行高増
+        apply_wrap_and_autofit_row_height(
+            ws, CELL_MAP["dayreport"], r.get("日報", ""), max_row_height=120.0
+        )
 
+        # 体温
         temp = (daily.get("体温", "") or "").strip()
         ws[CELL_MAP["temp"]].value = "未検温" if temp == "" else f"{temp}℃"
 
         # A16：userCaseDaily の備考（Y列相当）は使わない
-        daily_note = pick_daily_note(daily)  # 連絡専用列のみ拾う
-        cm_note = (r.get("備考") or r.get("実績記録票備考欄") or "").strip()  # caseDaily側
-        raw_contact = daily_note or cm_note
+        daily_contact = pick_daily_contact_only(daily)  # 連絡専用列のみ
+        cm_note = (r.get("備考") or r.get("実績記録票備考欄") or "").strip()  # case側
+        raw_contact = daily_contact or cm_note
 
-        ws[CELL_MAP["slack"]].value = format_contact_text(raw_contact)
-        set_font_size_only(ws, CELL_MAP["slack"], 8)
+        # A16：フォントは触らず、wrap＋必要なら行高増
+        apply_wrap_and_autofit_row_height(
+            ws, CELL_MAP["slack"], format_contact_text(raw_contact), max_row_height=120.0
+        )
 
     remove_sample_sheets(wb)
 
