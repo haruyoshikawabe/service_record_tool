@@ -40,6 +40,7 @@ MSG_MONTH_MISMATCH = "userCaseDailyとcaseMonth（caseDaily）の年月が合い
 MSG_CASE_NOT_SELECTED = "caseMonth（またはcaseDaily）が未選択です。"
 MSG_OUTDIR_NOT_SELECTED = "出力先が未選択です。"
 MSG_FILE_IN_USE = "ファイルにアクセスできません。別のプロセスが使用中です。"
+MSG_TEMPLATE_NOT_FOUND = "java.io.FileNotFoundException.Sample_Format.xlsx(指定されたファイルが見つかりません。)"
 
 
 def px_to_points(px: float) -> float:
@@ -96,12 +97,32 @@ def read_csv_dicts(path: Path) -> List[Dict[str, str]]:
         return rows
 
 
+# ====== ここが重要修正：日付を YYYY/MM/DD に統一（ゼロ埋め） ======
 def normalize_date(s: str) -> str:
-    return (s or "").strip().replace("-", "/")
+    """
+    入力例:
+      2026-01-08
+      2026/1/8
+      2026/01/08
+    → 2026/01/08 に統一
+    """
+    s = (s or "").strip()
+    if not s:
+        return ""
+
+    s = s.replace("-", "/")
+    m = re.match(r"^\s*(\d{4})/(\d{1,2})/(\d{1,2})\s*$", s)
+    if not m:
+        return s  # 変な形式はそのまま（ただし一致しない可能性あり）
+
+    y = int(m.group(1))
+    mo = int(m.group(2))
+    d = int(m.group(3))
+    return f"{y:04d}/{mo:02d}/{d:02d}"
+# ===============================================================
 
 
 def safe_sheet_name(name: str) -> str:
-    # ★修正："]" を確実に除去（元コードは "]" が置換されないバグがあった）
     for c in [":", "/", "\\", "?", "*", "[", "]"]:
         name = name.replace(c, "_")
     return name.strip()[:31]
@@ -159,13 +180,33 @@ def remove_sample_sheets(wb) -> None:
         del wb[name]
 
 
+# ====== ここも重要修正：日付列が無い場合、中身が日付っぽい列を探す ======
 def pick_date_column(daily_rows: List[Dict[str, str]]) -> str:
     candidates = ["日付", "年月日", "支援実施日"]
     keys = list(daily_rows[0].keys())
+
     for c in candidates:
         if c in keys:
             return c
-    return keys[0]
+
+    # 候補が無い場合：各列の値が yyyy/mm/dd or yyyy-mm-dd っぽい割合で決める
+    date_pat = re.compile(r"^\s*\d{4}[-/]\d{1,2}[-/]\d{1,2}\s*$")
+    best_key = keys[0]
+    best_score = -1
+
+    sample = daily_rows[: min(20, len(daily_rows))]
+    for k in keys:
+        score = 0
+        for r in sample:
+            v = (r.get(k) or "").strip()
+            if date_pat.match(v):
+                score += 1
+        if score > best_score:
+            best_score = score
+            best_key = k
+
+    return best_key
+# ====================================================================
 
 
 def pick_daily_contact_only(daily: Dict[str, str]) -> str:
@@ -198,7 +239,6 @@ def build_program(d: Dict[str, str]) -> str:
 
     add(d.get("午前のプログラム", ""), d.get("午前のプログラム詳細", ""))
     add(d.get("午後1のプログラム", ""), d.get("午後1のプログラム詳細", ""))
-    add(d.get("午後2のプログラム", ""), d.get("午後2のプログラム詳細", ""))
     add(d.get("午後2のプログラム", ""), d.get("午後2のプログラム詳細", ""))
     add(d.get("終日のプログラム", ""), d.get("終日のプログラム詳細", ""))
     return "\n".join(out)
@@ -321,40 +361,21 @@ def build_output_filename(case_rows: List[Dict[str, str]], yyyymm: Optional[str]
     name = (case_rows[0].get("氏名") or "").strip() or "名前未設定"
     if not yyyymm:
         d = normalize_date(case_rows[0].get("年月日", ""))
-        m = re.match(r"^(\d{4})/(\d{1,2})", d)
-        yyyymm = f"{m.group(1)}{int(m.group(2)):02d}" if m else "YYYYMM"
+        m = re.match(r"^(\d{4})/(\d{2})", d)
+        yyyymm = f"{m.group(1)}{m.group(2)}" if m else "YYYYMM"
     return f"{name}_{yyyymm}_サービス支援記録.xlsx"
 
 
-def load_template_or_fail() -> Path:
-    """
-    ★重要：PyInstaller(onefile)対応のテンプレ探索
-    探索順:
-      1) sys._MEIPASS（onefileの一時展開先）
-      2) exeのあるフォルダ（frozen時） / このpyのフォルダ（通常時）
-      3) カレントディレクトリ
-    """
-    candidates: List[Path] = []
-
-    meipass = getattr(sys, "_MEIPASS", None)
-    if meipass:
-        candidates.append(Path(meipass) / "Sample_Format.xlsx")
-
-    candidates.append(get_base_folder() / "Sample_Format.xlsx")
-    candidates.append(Path.cwd() / "Sample_Format.xlsx")
-
-    for p in candidates:
-        if p.exists():
-            return p
-
-    raise FileNotFoundError(
-        "Sample_Format.xlsx が見つかりません。"
-        "exeと同じフォルダに置くか、GitHub Actions の PyInstaller --add-data 設定を確認してください。"
-    )
+def load_template_or_fail(base: Path) -> Path:
+    tpl = base / "Sample_Format.xlsx"
+    if not tpl.exists():
+        raise FileNotFoundError(MSG_TEMPLATE_NOT_FOUND)
+    return tpl
 
 
 def generate(user_csv: Path, case_csv: Path, outdir: Path) -> Path:
-    template_path = load_template_or_fail()
+    base = get_base_folder()
+    template_path = load_template_or_fail(base)
 
     ensure_same_month(user_csv, case_csv)
 
@@ -388,7 +409,9 @@ def generate(user_csv: Path, case_csv: Path, outdir: Path) -> Path:
     date_col = pick_date_column(daily_rows)
     daily_by_date: Dict[str, Dict[str, str]] = {}
     for r in daily_rows:
-        daily_by_date[normalize_date(r.get(date_col, ""))] = r
+        key = normalize_date(r.get(date_col, ""))
+        if key:
+            daily_by_date[key] = r
 
     required = ["事業所名", "氏名", "年月日", "出欠等", "実績開始時間", "実績終了時間"]
     for c in required:
@@ -435,15 +458,19 @@ def generate(user_csv: Path, case_csv: Path, outdir: Path) -> Path:
         method_cell.value = normalize_method(r.get("実績記録票備考欄", ""))
         method_cell.alignment = Alignment(horizontal="center", vertical="center")
 
+        # A9（プログラム）
         ws[CELL_MAP["program"]].value = build_program(daily)
 
+        # A11（日報）
         ws[CELL_MAP["dayreport"]].value = r.get("日報", "")
         set_wrap_only(ws, CELL_MAP["dayreport"], horizontal_default="left", vertical_default="top")
         set_row_height_px(ws, CELL_MAP["dayreport"], A11_HEIGHT_PX)
 
+        # B13（体温）
         temp = (daily.get("体温", "") or "").strip()
         ws[CELL_MAP["temp"]].value = "未検温" if temp == "" else f"{temp}℃"
 
+        # A16（本人との連絡）
         daily_contact = pick_daily_contact_only(daily)
         cm_note = (r.get("備考") or r.get("実績記録票備考欄") or "").strip()
         raw_contact = daily_contact or cm_note
