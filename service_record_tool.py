@@ -40,7 +40,6 @@ MSG_MONTH_MISMATCH = "userCaseDailyとcaseMonth（caseDaily）の年月が合い
 MSG_CASE_NOT_SELECTED = "caseMonth（またはcaseDaily）が未選択です。"
 MSG_OUTDIR_NOT_SELECTED = "出力先が未選択です。"
 MSG_FILE_IN_USE = "ファイルにアクセスできません。別のプロセスが使用中です。"
-MSG_TEMPLATE_NOT_FOUND = "java.io.FileNotFoundException.Sample_Format.xlsx(指定されたファイルが見つかりません。)"
 
 
 def px_to_points(px: float) -> float:
@@ -102,7 +101,8 @@ def normalize_date(s: str) -> str:
 
 
 def safe_sheet_name(name: str) -> str:
-    for c in [":", "/", "\\", "?", "*", "[", "]]:
+    # ★修正："]" を確実に除去（元コードは "]" が置換されないバグがあった）
+    for c in [":", "/", "\\", "?", "*", "[", "]"]:
         name = name.replace(c, "_")
     return name.strip()[:31]
 
@@ -199,6 +199,7 @@ def build_program(d: Dict[str, str]) -> str:
     add(d.get("午前のプログラム", ""), d.get("午前のプログラム詳細", ""))
     add(d.get("午後1のプログラム", ""), d.get("午後1のプログラム詳細", ""))
     add(d.get("午後2のプログラム", ""), d.get("午後2のプログラム詳細", ""))
+    add(d.get("午後2のプログラム", ""), d.get("午後2のプログラム詳細", ""))
     add(d.get("終日のプログラム", ""), d.get("終日のプログラム詳細", ""))
     return "\n".join(out)
 
@@ -284,7 +285,6 @@ def ask_paths() -> Tuple[Optional[Path], Optional[Path], Optional[Path]]:
         messagebox.showerror("エラー", MSG_NOT_USERCASEDAILY)
         return None, None, None
 
-    # ★ここを修正：caseDaily → caseMonth（またはcaseDaily）
     case_path_str = filedialog.askopenfilename(
         title="caseMonth（またはcaseDaily）を選択",
         filetypes=[("CSV", "*.csv"), ("All files", "*.*")]
@@ -326,16 +326,35 @@ def build_output_filename(case_rows: List[Dict[str, str]], yyyymm: Optional[str]
     return f"{name}_{yyyymm}_サービス支援記録.xlsx"
 
 
-def load_template_or_fail(base: Path) -> Path:
-    tpl = base / "Sample_Format.xlsx"
-    if not tpl.exists():
-        raise FileNotFoundError(MSG_TEMPLATE_NOT_FOUND)
-    return tpl
+def load_template_or_fail() -> Path:
+    """
+    ★重要：PyInstaller(onefile)対応のテンプレ探索
+    探索順:
+      1) sys._MEIPASS（onefileの一時展開先）
+      2) exeのあるフォルダ（frozen時） / このpyのフォルダ（通常時）
+      3) カレントディレクトリ
+    """
+    candidates: List[Path] = []
+
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
+        candidates.append(Path(meipass) / "Sample_Format.xlsx")
+
+    candidates.append(get_base_folder() / "Sample_Format.xlsx")
+    candidates.append(Path.cwd() / "Sample_Format.xlsx")
+
+    for p in candidates:
+        if p.exists():
+            return p
+
+    raise FileNotFoundError(
+        "Sample_Format.xlsx が見つかりません。"
+        "exeと同じフォルダに置くか、GitHub Actions の PyInstaller --add-data 設定を確認してください。"
+    )
 
 
 def generate(user_csv: Path, case_csv: Path, outdir: Path) -> Path:
-    base = get_base_folder()
-    template_path = load_template_or_fail(base)
+    template_path = load_template_or_fail()
 
     ensure_same_month(user_csv, case_csv)
 
