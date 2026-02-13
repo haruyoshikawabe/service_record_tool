@@ -32,11 +32,12 @@ ABSENT_SKIP_VALUE = "欠席時対応"
 A11_HEIGHT_PX = 350
 A16_HEIGHT_PX = 500
 
+# UI/エラー文言
 MSG_NOT_USERCASEDAILY = "userCaseDailyではありません。"
-MSG_NOT_CASEDAILY = "caseDailyではありません。"
+MSG_NOT_CASE_MONTH_DAILY = "caseMonth（またはcaseDaily）ではありません。"
 MSG_NOT_CSV = "csvファイルではありません。"
-MSG_MONTH_MISMATCH = "userCaseDailyとcaseDailyの日時が合いません。"
-MSG_CASE_NOT_SELECTED = "caseDailyが未選択です。"
+MSG_MONTH_MISMATCH = "userCaseDailyとcaseMonth（caseDaily）の年月が合いません。"
+MSG_CASE_NOT_SELECTED = "caseMonth（またはcaseDaily）が未選択です。"
 MSG_OUTDIR_NOT_SELECTED = "出力先が未選択です。"
 MSG_FILE_IN_USE = "ファイルにアクセスできません。別のプロセスが使用中です。"
 MSG_TEMPLATE_NOT_FOUND = "java.io.FileNotFoundException.Sample_Format.xlsx(指定されたファイルが見つかりません。)"
@@ -65,9 +66,9 @@ def looks_like_userCaseDaily(path: Path) -> bool:
     return "userCaseDaily" in path.name
 
 
-def looks_like_caseDaily(path: Path) -> bool:
+def looks_like_caseMonth_or_caseDaily(path: Path) -> bool:
     name = path.name
-    return ("caseDaily" in name) or ("caseMonth" in name)
+    return ("caseMonth" in name) or ("caseDaily" in name)
 
 
 def extract_yyyymm_from_filename(path: Path) -> Optional[str]:
@@ -101,7 +102,7 @@ def normalize_date(s: str) -> str:
 
 
 def safe_sheet_name(name: str) -> str:
-    for c in [":", "/", "\\", "?", "*", "[", "]"]:
+    for c in [":", "/", "\\", "?", "*", "[", "]]:
         name = name.replace(c, "_")
     return name.strip()[:31]
 
@@ -260,9 +261,6 @@ def set_wrap_only(ws, addr: str, horizontal_default="left", vertical_default="to
 
 
 def set_row_height_px(ws, addr: str, height_px: float):
-    """
-    指定セルの「行」の高さを px 指定（内部はpt換算）で固定。
-    """
     row = ws[addr].row
     ws.row_dimensions[row].height = px_to_points(height_px)
 
@@ -271,7 +269,10 @@ def ask_paths() -> Tuple[Optional[Path], Optional[Path], Optional[Path]]:
     root = tk.Tk()
     root.withdraw()
 
-    user_path_str = filedialog.askopenfilename(title="userCaseDailyを選択", filetypes=[("CSV", "*.*")])
+    user_path_str = filedialog.askopenfilename(
+        title="userCaseDailyを選択",
+        filetypes=[("CSV", "*.csv"), ("All files", "*.*")]
+    )
     if not user_path_str:
         return None, None, None
     user_path = Path(user_path_str)
@@ -283,7 +284,11 @@ def ask_paths() -> Tuple[Optional[Path], Optional[Path], Optional[Path]]:
         messagebox.showerror("エラー", MSG_NOT_USERCASEDAILY)
         return None, None, None
 
-    case_path_str = filedialog.askopenfilename(title="caseDailyを選択", filetypes=[("CSV", "*.*")])
+    # ★ここを修正：caseDaily → caseMonth（またはcaseDaily）
+    case_path_str = filedialog.askopenfilename(
+        title="caseMonth（またはcaseDaily）を選択",
+        filetypes=[("CSV", "*.csv"), ("All files", "*.*")]
+    )
     if not case_path_str:
         messagebox.showerror("エラー", MSG_CASE_NOT_SELECTED)
         return None, None, None
@@ -292,8 +297,8 @@ def ask_paths() -> Tuple[Optional[Path], Optional[Path], Optional[Path]]:
     if not is_csv(case_path):
         messagebox.showerror("エラー", MSG_NOT_CSV)
         return None, None, None
-    if not looks_like_caseDaily(case_path):
-        messagebox.showerror("エラー", MSG_NOT_CASEDAILY)
+    if not looks_like_caseMonth_or_caseDaily(case_path):
+        messagebox.showerror("エラー", MSG_NOT_CASE_MONTH_DAILY)
         return None, None, None
 
     outdir_str = filedialog.askdirectory(title="出力先フォルダを選択")
@@ -337,7 +342,7 @@ def generate(user_csv: Path, case_csv: Path, outdir: Path) -> Path:
     case_rows = read_csv_dicts(case_csv)
     daily_rows = read_csv_dicts(user_csv)
     if not case_rows:
-        raise RuntimeError("caseDailyが空です。")
+        raise RuntimeError("caseMonth（caseDaily）が空です。")
     if not daily_rows:
         raise RuntimeError("userCaseDailyが空です。")
 
@@ -355,7 +360,6 @@ def generate(user_csv: Path, case_csv: Path, outdir: Path) -> Path:
     except (InvalidFileException, Exception) as e:
         raise RuntimeError(f"テンプレ読み込み失敗: {e}")
 
-    # Sample系を削除
     remove_sample_sheets(wb)
 
     if TEMPLATE_SHEET not in wb.sheetnames:
@@ -370,7 +374,7 @@ def generate(user_csv: Path, case_csv: Path, outdir: Path) -> Path:
     required = ["事業所名", "氏名", "年月日", "出欠等", "実績開始時間", "実績終了時間"]
     for c in required:
         if c not in case_rows[0]:
-            raise RuntimeError(f"caseDailyに必須列がありません: {c}")
+            raise RuntimeError(f"caseMonth（caseDaily）に必須列がありません: {c}")
 
     for r in case_rows:
         status = (r.get("出欠等", "") or "").strip()
@@ -403,39 +407,32 @@ def generate(user_csv: Path, case_csv: Path, outdir: Path) -> Path:
         ws[CELL_MAP["date"]].value = date
         ws[CELL_MAP["user"]].value = r.get("氏名", "")
 
-        # 対応時間
         ws[CELL_MAP["time"]].value = format_time_range_jp(
             r.get("実績開始時間", ""),
             r.get("実績終了時間", "")
         )
 
-        # 対応手段（G5）：中央揃え
         method_cell = ws[CELL_MAP["method"]]
         method_cell.value = normalize_method(r.get("実績記録票備考欄", ""))
         method_cell.alignment = Alignment(horizontal="center", vertical="center")
 
-        # プログラム
         ws[CELL_MAP["program"]].value = build_program(daily)
 
-        # A11：値入力＋wrap（横はテンプレ通り）＋行高固定350px
         ws[CELL_MAP["dayreport"]].value = r.get("日報", "")
         set_wrap_only(ws, CELL_MAP["dayreport"], horizontal_default="left", vertical_default="top")
         set_row_height_px(ws, CELL_MAP["dayreport"], A11_HEIGHT_PX)
 
-        # 体温
         temp = (daily.get("体温", "") or "").strip()
         ws[CELL_MAP["temp"]].value = "未検温" if temp == "" else f"{temp}℃"
 
-        # A16：userCaseDaily備考（Y列相当）は使わない
-        daily_contact = pick_daily_contact_only(daily)  # 連絡専用列のみ
-        cm_note = (r.get("備考") or r.get("実績記録票備考欄") or "").strip()  # case側
+        daily_contact = pick_daily_contact_only(daily)
+        cm_note = (r.get("備考") or r.get("実績記録票備考欄") or "").strip()
         raw_contact = daily_contact or cm_note
 
         ws[CELL_MAP["slack"]].value = format_contact_text(raw_contact)
         set_wrap_only(ws, CELL_MAP["slack"], horizontal_default="left", vertical_default="top")
         set_row_height_px(ws, CELL_MAP["slack"], A16_HEIGHT_PX)
 
-    # 念のため最後にもSample系削除
     remove_sample_sheets(wb)
 
     try:
