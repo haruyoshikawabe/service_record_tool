@@ -20,17 +20,13 @@ CELL_MAP = {
     "time": "B5",          # 対応時間
     "method": "G5",        # 対応手段（中央揃え）
     "program": "A9",
-    "dayreport": "A11",    # A11：行高固定（350px相当）
+    "dayreport": "A11",
     "temp": "B13",
-    "slack": "A16",        # A16：行高固定（500px相当）
+    "slack": "A16",
 }
 
 ATTEND_VALUE = "出席"
 ABSENT_SKIP_VALUE = "欠席時対応"
-
-# 行高指定（px）
-A11_HEIGHT_PX = 350
-A16_HEIGHT_PX = 500
 
 # UI/エラー文言
 MSG_NOT_USERCASEDAILY = "userCaseDailyではありません。"
@@ -41,14 +37,6 @@ MSG_CASE_NOT_SELECTED = "caseMonth（またはcaseDaily）が未選択です。"
 MSG_OUTDIR_NOT_SELECTED = "出力先が未選択です。"
 MSG_FILE_IN_USE = "ファイルにアクセスできません。別のプロセスが使用中です。"
 MSG_TEMPLATE_NOT_FOUND = "java.io.FileNotFoundException.Sample_Format.xlsx(指定されたファイルが見つかりません。)"
-
-
-def px_to_points(px: float) -> float:
-    """
-    Excelの行高はポイント(pt)で管理される。
-    96dpi想定の一般的な換算：1px ≒ 0.75pt
-    """
-    return px * 0.75
 
 
 def get_base_folder() -> Path:
@@ -97,7 +85,6 @@ def read_csv_dicts(path: Path) -> List[Dict[str, str]]:
         return rows
 
 
-# ====== ここが重要修正：日付を YYYY/MM/DD に統一（ゼロ埋め） ======
 def normalize_date(s: str) -> str:
     """
     入力例:
@@ -113,13 +100,12 @@ def normalize_date(s: str) -> str:
     s = s.replace("-", "/")
     m = re.match(r"^\s*(\d{4})/(\d{1,2})/(\d{1,2})\s*$", s)
     if not m:
-        return s  # 変な形式はそのまま（ただし一致しない可能性あり）
+        return s
 
     y = int(m.group(1))
     mo = int(m.group(2))
     d = int(m.group(3))
     return f"{y:04d}/{mo:02d}/{d:02d}"
-# ===============================================================
 
 
 def safe_sheet_name(name: str) -> str:
@@ -180,7 +166,6 @@ def remove_sample_sheets(wb) -> None:
         del wb[name]
 
 
-# ====== ここも重要修正：日付列が無い場合、中身が日付っぽい列を探す ======
 def pick_date_column(daily_rows: List[Dict[str, str]]) -> str:
     candidates = ["日付", "年月日", "支援実施日"]
     keys = list(daily_rows[0].keys())
@@ -206,7 +191,6 @@ def pick_date_column(daily_rows: List[Dict[str, str]]) -> str:
             best_key = k
 
     return best_key
-# ====================================================================
 
 
 def pick_daily_contact_only(daily: Dict[str, str]) -> str:
@@ -255,23 +239,29 @@ def format_contact_text(raw: str) -> str:
     """
     本人との連絡（A16）
     - 時刻(HH:MM)単位で改行
-    - 各行は「HH:MM 」＋本文
+    - 追加要件：『HH時間前』も時間トークンとして扱う（例：10時間前）
+    - 各行は「時刻 」＋本文
     - 本文は30文字以降を「・・・・」で省略
     """
     text = (raw or "").strip()
     if not text:
         return ""
 
-    parts = re.split(r"(\b\d{1,2}:\d{2}\b)", text)
+    # 時刻トークン：HH:MM または HH時間前
+    token_pat = r"(\b\d{1,2}:\d{2}\b|\b\d{1,2}時間前\b)"
+    parts = re.split(token_pat, text)
     if len(parts) == 1:
         body = text
         return (body[:30] + "・・・・") if len(body) > 30 else body
+
+    def is_token(s: str) -> bool:
+        return bool(re.fullmatch(r"\b\d{1,2}:\d{2}\b|\b\d{1,2}時間前\b", s or ""))
 
     lines: List[str] = []
     i = 0
     while i < len(parts):
         seg = parts[i]
-        if re.fullmatch(r"\b\d{1,2}:\d{2}\b", seg or ""):
+        if is_token(seg):
             t = seg
             msg = (parts[i + 1] if i + 1 < len(parts) else "").strip()
             if len(msg) > 30:
@@ -286,7 +276,7 @@ def format_contact_text(raw: str) -> str:
 
 def set_wrap_only(ws, addr: str, horizontal_default="left", vertical_default="top"):
     """
-    列幅等は一切変更しない。
+    テンプレの形（列幅/結合/行高）を一切変えない。
     wrap_text だけオンにする（既存の揃えは極力維持）。
     """
     cell = ws[addr]
@@ -299,11 +289,6 @@ def set_wrap_only(ws, addr: str, horizontal_default="left", vertical_default="to
         shrinkToFit=False,
         indent=a.indent,
     )
-
-
-def set_row_height_px(ws, addr: str, height_px: float):
-    row = ws[addr].row
-    ws.row_dimensions[row].height = px_to_points(height_px)
 
 
 def ask_paths() -> Tuple[Optional[Path], Optional[Path], Optional[Path]]:
@@ -461,23 +446,21 @@ def generate(user_csv: Path, case_csv: Path, outdir: Path) -> Path:
         # A9（プログラム）
         ws[CELL_MAP["program"]].value = build_program(daily)
 
-        # A11（日報）
+        # A11（日報）：行高はテンプレのまま（変更しない）
         ws[CELL_MAP["dayreport"]].value = r.get("日報", "")
         set_wrap_only(ws, CELL_MAP["dayreport"], horizontal_default="left", vertical_default="top")
-        set_row_height_px(ws, CELL_MAP["dayreport"], A11_HEIGHT_PX)
 
         # B13（体温）
         temp = (daily.get("体温", "") or "").strip()
         ws[CELL_MAP["temp"]].value = "未検温" if temp == "" else f"{temp}℃"
 
-        # A16（本人との連絡）
+        # A16（本人との連絡）：行高はテンプレのまま（変更しない）
         daily_contact = pick_daily_contact_only(daily)
         cm_note = (r.get("備考") or r.get("実績記録票備考欄") or "").strip()
         raw_contact = daily_contact or cm_note
 
         ws[CELL_MAP["slack"]].value = format_contact_text(raw_contact)
         set_wrap_only(ws, CELL_MAP["slack"], horizontal_default="left", vertical_default="top")
-        set_row_height_px(ws, CELL_MAP["slack"], A16_HEIGHT_PX)
 
     remove_sample_sheets(wb)
 
