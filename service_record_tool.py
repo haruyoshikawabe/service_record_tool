@@ -28,7 +28,7 @@ CELL_MAP = {
 ATTEND_VALUE = "出席"
 ABSENT_SKIP_VALUE = "欠席時対応"
 
-# 行高指定（px）※「全文表示しない」方針なら、ここは以前の値へ戻してください
+# 行高指定（px）
 A11_HEIGHT_PX = 350
 A16_HEIGHT_PX = 500
 
@@ -38,6 +38,7 @@ MSG_NOT_CASE_MONTH_DAILY = "caseMonth（またはcaseDaily）ではありませ�
 MSG_NOT_CSV = "csvファイルではありません。"
 MSG_MONTH_MISMATCH = "userCaseDailyとcaseMonth（caseDaily）の年月が合いません。"
 MSG_MONTH_PARSE_FAIL = "ファイル名から年月（YYYYMM）を取得できません。ファイル名規則を確認してください。"
+MSG_USER_NOT_SELECTED = "userCaseDailyが未選択です。"
 MSG_CASE_NOT_SELECTED = "caseMonth（またはcaseDaily）が未選択です。"
 MSG_OUTDIR_NOT_SELECTED = "出力先が未選択です。"
 MSG_FILE_IN_USE = "ファイルにアクセスできません。別のプロセスが使用中です。"
@@ -45,12 +46,10 @@ MSG_TEMPLATE_NOT_FOUND = "java.io.FileNotFoundException.Sample_Format.xlsx(指�
 
 
 def px_to_points(px: float) -> float:
-    # 96dpi想定：1px ≒ 0.75pt
     return px * 0.75
 
 
 def get_base_folder() -> Path:
-    # PyInstaller(onefile) 対策：exeのフォルダを基準
     if getattr(sys, "frozen", False):
         return Path(sys.executable).resolve().parent
     return Path(__file__).resolve().parent
@@ -70,26 +69,15 @@ def looks_like_caseMonth_or_caseDaily(path: Path) -> bool:
 
 
 def extract_yyyymm_from_filename(path: Path) -> Optional[str]:
-    """
-    ファイル名末尾の _YYYYMM または _YYYYMMDD から YYYYMM を抽出する。
-    例:
-      userCaseDaily_1045633_202601.csv   -> 202601
-      caseMonth_1045633_20260101.csv    -> 202601
-    """
     name = path.name
-
-    # 最後の _数字 を拾う（6～8桁）
     m = re.search(r"_(\d{6})(\d{2})?(?=\D|$)", name)
     if m:
         return m.group(1)
-
-    # 念のため、_YYYY-MM や _YYYY_MM などの変形にも対応
     m2 = re.search(r"_(\d{4})[-_/](\d{1,2})(?=\D|$)", name)
     if m2:
         y = m2.group(1)
         mo = int(m2.group(2))
         return f"{y}{mo:02d}"
-
     return None
 
 
@@ -124,7 +112,6 @@ def safe_sheet_name(name: str) -> str:
     return name.strip()[:31]
 
 
-# ===== 対応時間：「○時○分～○時○分」に寄せる =====
 def parse_time_flexible(s: str) -> Optional[Tuple[int, int]]:
     s = (s or "").strip()
     if not s:
@@ -167,7 +154,6 @@ def format_time_range_jp(start: str, end: str) -> str:
     if left and right:
         return f"{left}～{right}"
     return left or right
-# ===============================================
 
 
 def remove_sample_sheets(wb) -> None:
@@ -268,7 +254,40 @@ def set_row_height_px(ws, addr: str, height_px: float):
     ws.row_dimensions[row].height = px_to_points(height_px)
 
 
+def ensure_same_month(user_path: Path, case_path: Path) -> str:
+    u = extract_yyyymm_from_filename(user_path)
+    c = extract_yyyymm_from_filename(case_path)
+
+    if not u or not c:
+        raise ValueError(f"{MSG_MONTH_PARSE_FAIL}\nuserCaseDaily: {user_path.name}\ncaseMonth: {case_path.name}")
+    if u != c:
+        raise ValueError(
+            f"{MSG_MONTH_MISMATCH}\n"
+            f"userCaseDaily: {user_path.name}（{u}）\n"
+            f"caseMonth/caseDaily: {case_path.name}（{c}）"
+        )
+    return u
+
+
+def build_output_filename(case_rows: List[Dict[str, str]], yyyymm: str) -> str:
+    name = (case_rows[0].get("氏名") or "").strip() or "名前未設定"
+    return f"{name}_{yyyymm}_サービス支援記録.xlsx"
+
+
+def load_template_or_fail(base: Path) -> Path:
+    tpl = base / "Sample_Format.xlsx"
+    if not tpl.exists():
+        raise FileNotFoundError(MSG_TEMPLATE_NOT_FOUND)
+    return tpl
+
+
 def ask_paths() -> Tuple[Optional[Path], Optional[Path], Optional[Path]]:
+    """
+    テスト仕様書の通り：
+      - userCaseDaily 未選択 -> エラーメッセージ表示
+      - caseMonth 未選択     -> エラーメッセージ表示
+      - 出力先 未選択         -> エラーメッセージ表示
+    """
     root = tk.Tk()
     root.withdraw()
 
@@ -277,6 +296,7 @@ def ask_paths() -> Tuple[Optional[Path], Optional[Path], Optional[Path]]:
         filetypes=[("CSV", "*.csv"), ("All files", "*.*")]
     )
     if not user_path_str:
+        messagebox.showerror("エラー", MSG_USER_NOT_SELECTED)
         return None, None, None
     user_path = Path(user_path_str)
 
@@ -312,44 +332,10 @@ def ask_paths() -> Tuple[Optional[Path], Optional[Path], Optional[Path]]:
     return user_path, case_path, outdir
 
 
-def ensure_same_month(user_path: Path, case_path: Path) -> str:
-    """
-    userCaseDaily と caseMonth(caseDaily) の年月(YYYYMM)が一致することを保証する。
-    一致しない場合は、必ずエラーメッセージを出して止める。
-    戻り値：確定したYYYYMM（出力名などで使える）
-    """
-    u = extract_yyyymm_from_filename(user_path)
-    c = extract_yyyymm_from_filename(case_path)
-
-    if not u or not c:
-        raise ValueError(f"{MSG_MONTH_PARSE_FAIL}\nuserCaseDaily: {user_path.name}\ncaseMonth: {case_path.name}")
-
-    if u != c:
-        raise ValueError(
-            f"{MSG_MONTH_MISMATCH}\n"
-            f"userCaseDaily: {user_path.name}（{u}）\n"
-            f"caseMonth/caseDaily: {case_path.name}（{c}）"
-        )
-    return u
-
-
-def build_output_filename(case_rows: List[Dict[str, str]], yyyymm: str) -> str:
-    name = (case_rows[0].get("氏名") or "").strip() or "名前未設定"
-    return f"{name}_{yyyymm}_サービス支援記録.xlsx"
-
-
-def load_template_or_fail(base: Path) -> Path:
-    tpl = base / "Sample_Format.xlsx"
-    if not tpl.exists():
-        raise FileNotFoundError(MSG_TEMPLATE_NOT_FOUND)
-    return tpl
-
-
 def generate(user_csv: Path, case_csv: Path, outdir: Path) -> Path:
     base = get_base_folder()
     template_path = load_template_or_fail(base)
 
-    # ★ここで年月一致を強制（不一致なら例外→messageboxで表示）
     yyyymm = ensure_same_month(user_csv, case_csv)
 
     case_rows = read_csv_dicts(case_csv)
@@ -460,7 +446,8 @@ def main():
     root.withdraw()
 
     user_path, case_path, outdir = ask_paths()
-    if user_path is None and case_path is None and outdir is None:
+    # ask_paths 内で未選択エラーを出して None 返すので、ここは静かに終了でOK
+    if user_path is None or case_path is None or outdir is None:
         return
 
     try:
