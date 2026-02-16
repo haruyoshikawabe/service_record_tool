@@ -11,14 +11,15 @@ from openpyxl import load_workbook
 from openpyxl.styles import Alignment
 from openpyxl.utils.exceptions import InvalidFileException
 
+# 期待するテンプレシート名（ただし削除は「実際に使ったシート」を基準にする）
 TEMPLATE_SHEET = "Format"
 
 CELL_MAP = {
     "office": "B3",
     "date": "B4",
     "user": "G4",
-    "time": "B5",          # 対応時間
-    "method": "G5",        # 対応手段（中央揃え）
+    "time": "B5",
+    "method": "G5",
     "program": "A9",
     "dayreport": "A11",
     "temp": "B13",
@@ -28,29 +29,18 @@ CELL_MAP = {
 ATTEND_VALUE = "出席"
 ABSENT_SKIP_VALUE = "欠席時対応"
 
-# 行高指定（px）※「全文表示しない」方針なら、ここは以前の値へ戻してください
-A11_HEIGHT_PX = 350
-A16_HEIGHT_PX = 500
-
-# UI/エラー文言
 MSG_NOT_USERCASEDAILY = "userCaseDailyではありません。"
 MSG_NOT_CASE_MONTH_DAILY = "caseMonth（またはcaseDaily）ではありません。"
 MSG_NOT_CSV = "csvファイルではありません。"
 MSG_MONTH_MISMATCH = "userCaseDailyとcaseMonth（caseDaily）の年月が合いません。"
-MSG_MONTH_PARSE_FAIL = "ファイル名から年月（YYYYMM）を取得できません。ファイル名規則を確認してください。"
 MSG_CASE_NOT_SELECTED = "caseMonth（またはcaseDaily）が未選択です。"
+MSG_USER_NOT_SELECTED = "userCaseDailyが未選択です。"
 MSG_OUTDIR_NOT_SELECTED = "出力先が未選択です。"
 MSG_FILE_IN_USE = "ファイルにアクセスできません。別のプロセスが使用中です。"
-MSG_TEMPLATE_NOT_FOUND = "java.io.FileNotFoundException.Sample_Format.xlsx(指定されたファイルが見つかりません。)"
-
-
-def px_to_points(px: float) -> float:
-    # 96dpi想定：1px ≒ 0.75pt
-    return px * 0.75
+MSG_TEMPLATE_NOT_FOUND = "テンプレxlsxが見つかりません。exeと同じフォルダにテンプレxlsxを置いてください。"
 
 
 def get_base_folder() -> Path:
-    # PyInstaller(onefile) 対策：exeのフォルダを基準
     if getattr(sys, "frozen", False):
         return Path(sys.executable).resolve().parent
     return Path(__file__).resolve().parent
@@ -70,27 +60,9 @@ def looks_like_caseMonth_or_caseDaily(path: Path) -> bool:
 
 
 def extract_yyyymm_from_filename(path: Path) -> Optional[str]:
-    """
-    ファイル名末尾の _YYYYMM または _YYYYMMDD から YYYYMM を抽出する。
-    例:
-      userCaseDaily_1045633_202601.csv   -> 202601
-      caseMonth_1045633_20260101.csv    -> 202601
-    """
-    name = path.name
-
-    # 最後の _数字 を拾う（6～8桁）
-    m = re.search(r"_(\d{6})(\d{2})?(?=\D|$)", name)
-    if m:
-        return m.group(1)
-
-    # 念のため、_YYYY-MM や _YYYY_MM などの変形にも対応
-    m2 = re.search(r"_(\d{4})[-_/](\d{1,2})(?=\D|$)", name)
-    if m2:
-        y = m2.group(1)
-        mo = int(m2.group(2))
-        return f"{y}{mo:02d}"
-
-    return None
+    # *_YYYYMM.csv / *_YYYYMMDD.csv のどちらでも YYYYMM を返す
+    m = re.search(r"_(\d{6})(\d{2})?", path.name)
+    return m.group(1) if m else None
 
 
 def detect_encoding(path: Path) -> str:
@@ -115,21 +87,32 @@ def read_csv_dicts(path: Path) -> List[Dict[str, str]]:
 
 
 def normalize_date(s: str) -> str:
-    return (s or "").strip().replace("-", "/")
+    s = (s or "").strip()
+    if not s:
+        return ""
+    m = re.match(r"^\s*(\d{4})[/-](\d{1,2})[/-](\d{1,2})\s*$", s)
+    if m:
+        y = int(m.group(1))
+        mo = int(m.group(2))
+        d = int(m.group(3))
+        return f"{y}/{mo}/{d}"
+    return s.replace("-", "/").strip()
 
 
-def safe_sheet_name(name: str) -> str:
-    for c in [":", "/", "\\", "?", "*", "[", "]"]:
-        name = name.replace(c, "_")
-    return name.strip()[:31]
+def to_yyyymmdd(date_norm: str) -> str:
+    m = re.match(r"^(\d{4})/(\d{1,2})/(\d{1,2})$", (date_norm or "").strip())
+    if not m:
+        return ""
+    y = int(m.group(1))
+    mo = int(m.group(2))
+    d = int(m.group(3))
+    return f"{y}{mo:02d}{d:02d}"
 
 
-# ===== 対応時間：「○時○分～○時○分」に寄せる =====
 def parse_time_flexible(s: str) -> Optional[Tuple[int, int]]:
     s = (s or "").strip()
     if not s:
         return None
-
     patterns = [
         r"(\d{1,2}):(\d{2})(?::\d{2})?",
         r"(\d{1,2})時(\d{1,2})分",
@@ -147,7 +130,6 @@ def parse_time_flexible(s: str) -> Optional[Tuple[int, int]]:
 def format_time_range_jp(start: str, end: str) -> str:
     ps = parse_time_flexible(start)
     pe = parse_time_flexible(end)
-
     if ps and pe:
         sh, sm = ps
         eh, em = pe
@@ -167,11 +149,11 @@ def format_time_range_jp(start: str, end: str) -> str:
     if left and right:
         return f"{left}～{right}"
     return left or right
-# ===============================================
 
 
-def remove_sample_sheets(wb) -> None:
-    targets = [name for name in wb.sheetnames if "sample" in name.lower()]
+def remove_sheets_by_predicate(wb, pred):
+    # openpyxlはイテレートしながら削除すると壊れるので、対象名を先に確定
+    targets = [name for name in wb.sheetnames if pred(name)]
     for name in targets:
         del wb[name]
 
@@ -213,7 +195,7 @@ def build_program(d: Dict[str, str]) -> str:
     add(d.get("午後1のプログラム", ""), d.get("午後1のプログラム詳細", ""))
     add(d.get("午後2のプログラム", ""), d.get("午後2のプログラム詳細", ""))
     add(d.get("終日のプログラム", ""), d.get("終日のプログラム詳細", ""))
-    return "\n".join(out)
+    return "\n".join([x for x in out if x.strip()])
 
 
 def normalize_method(raw: str) -> str:
@@ -227,8 +209,8 @@ def format_contact_text(raw: str) -> str:
     text = (raw or "").strip()
     if not text:
         return ""
-
-    parts = re.split(r"(\b\d{1,2}:\d{2}\b)", text)
+    token_pat = r"(\b\d{1,2}:\d{2}\b|\b\d{1,2}時間前\b)"
+    parts = re.split(token_pat, text)
     if len(parts) == 1:
         body = text
         return (body[:30] + "・・・・") if len(body) > 30 else body
@@ -236,8 +218,8 @@ def format_contact_text(raw: str) -> str:
     lines: List[str] = []
     i = 0
     while i < len(parts):
-        seg = parts[i]
-        if re.fullmatch(r"\b\d{1,2}:\d{2}\b", seg or ""):
+        seg = parts[i] or ""
+        if re.fullmatch(r"\b\d{1,2}:\d{2}\b|\b\d{1,2}時間前\b", seg):
             t = seg
             msg = (parts[i + 1] if i + 1 < len(parts) else "").strip()
             if len(msg) > 30:
@@ -246,26 +228,7 @@ def format_contact_text(raw: str) -> str:
             i += 2
         else:
             i += 1
-
     return "\n".join([ln for ln in lines if ln])
-
-
-def set_wrap_only(ws, addr: str, horizontal_default="left", vertical_default="top"):
-    cell = ws[addr]
-    a = cell.alignment if cell.alignment else Alignment()
-    ws[addr].alignment = Alignment(
-        horizontal=a.horizontal if a.horizontal else horizontal_default,
-        vertical=a.vertical if a.vertical else vertical_default,
-        text_rotation=a.text_rotation,
-        wrap_text=True,
-        shrinkToFit=False,
-        indent=a.indent,
-    )
-
-
-def set_row_height_px(ws, addr: str, height_px: float):
-    row = ws[addr].row
-    ws.row_dimensions[row].height = px_to_points(height_px)
 
 
 def ask_paths() -> Tuple[Optional[Path], Optional[Path], Optional[Path]]:
@@ -277,6 +240,7 @@ def ask_paths() -> Tuple[Optional[Path], Optional[Path], Optional[Path]]:
         filetypes=[("CSV", "*.csv"), ("All files", "*.*")]
     )
     if not user_path_str:
+        messagebox.showerror("エラー", MSG_USER_NOT_SELECTED)
         return None, None, None
     user_path = Path(user_path_str)
 
@@ -313,44 +277,56 @@ def ask_paths() -> Tuple[Optional[Path], Optional[Path], Optional[Path]]:
 
 
 def ensure_same_month(user_path: Path, case_path: Path) -> str:
-    """
-    userCaseDaily と caseMonth(caseDaily) の年月(YYYYMM)が一致することを保証する。
-    一致しない場合は、必ずエラーメッセージを出して止める。
-    戻り値：確定したYYYYMM（出力名などで使える）
-    """
-    u = extract_yyyymm_from_filename(user_path)
-    c = extract_yyyymm_from_filename(case_path)
-
-    if not u or not c:
-        raise ValueError(f"{MSG_MONTH_PARSE_FAIL}\nuserCaseDaily: {user_path.name}\ncaseMonth: {case_path.name}")
-
-    if u != c:
-        raise ValueError(
-            f"{MSG_MONTH_MISMATCH}\n"
-            f"userCaseDaily: {user_path.name}（{u}）\n"
-            f"caseMonth/caseDaily: {case_path.name}（{c}）"
-        )
-    return u
+    u = extract_yyyymm_from_filename(user_path) or ""
+    c = extract_yyyymm_from_filename(case_path) or ""
+    if u and c and (u != c):
+        raise ValueError(MSG_MONTH_MISMATCH)
+    return c or u
 
 
-def build_output_filename(case_rows: List[Dict[str, str]], yyyymm: str) -> str:
-    name = (case_rows[0].get("氏名") or "").strip() or "名前未設定"
-    return f"{name}_{yyyymm}_サービス支援記録.xlsx"
+def build_output_filename(name: str, yyyymm: str) -> str:
+    safe_name = (name or "").strip() or "名前未設定"
+    safe_yyyymm = (yyyymm or "").strip() or "YYYYMM"
+    return f"{safe_name}_{safe_yyyymm}_サービス支援記録.xlsx"
 
 
 def load_template_or_fail(base: Path) -> Path:
-    tpl = base / "Sample_Format.xlsx"
-    if not tpl.exists():
-        raise FileNotFoundError(MSG_TEMPLATE_NOT_FOUND)
-    return tpl
+    candidates = [
+        base / "Sample_Format.xlsx",
+        base / "Sample Format.xlsx",
+        base / "サービス支援記録ーSample Format(河辺陽成).xlsx",
+        base / "サービス支援記録-Sample Format(河辺陽成).xlsx",
+    ]
+    for p in candidates:
+        if p.exists():
+            return p
+    # それでも見つからない場合は同フォルダのxlsxを1つ使う（最後の保険）
+    for p in base.glob("*.xlsx"):
+        return p
+    raise FileNotFoundError(MSG_TEMPLATE_NOT_FOUND)
+
+
+def pick_template_sheet(wb):
+    """
+    テンプレシートを「名前のゆらぎ」に強く選ぶ。
+    1) TEMPLATE_SHEET と一致（前後空白を除去して比較）
+    2) sheet名に 'format' を含む
+    """
+    # 1) "Format" と等価（trim比較）
+    for n in wb.sheetnames:
+        if n.strip() == TEMPLATE_SHEET:
+            return wb[n]
+    # 2) format を含む
+    for n in wb.sheetnames:
+        if "format" in n.lower():
+            return wb[n]
+    # 3) どうしても無ければ先頭
+    return wb[wb.sheetnames[0]]
 
 
 def generate(user_csv: Path, case_csv: Path, outdir: Path) -> Path:
     base = get_base_folder()
     template_path = load_template_or_fail(base)
-
-    # ★ここで年月一致を強制（不一致なら例外→messageboxで表示）
-    yyyymm = ensure_same_month(user_csv, case_csv)
 
     case_rows = read_csv_dicts(case_csv)
     daily_rows = read_csv_dicts(user_csv)
@@ -359,11 +335,24 @@ def generate(user_csv: Path, case_csv: Path, outdir: Path) -> Path:
     if not daily_rows:
         raise RuntimeError("userCaseDailyが空です。")
 
-    out_name = build_output_filename(case_rows, yyyymm)
+    required = ["事業所名", "氏名", "年月日", "出欠等", "実績開始時間", "実績終了時間"]
+    for c in required:
+        if c not in case_rows[0]:
+            raise RuntimeError(f"caseMonth（caseDaily）に必須列がありません: {c}")
+
+    # yyyymm を確定（ファイル名優先、無理なら最初の年月日から）
+    yyyymm = ensure_same_month(user_csv, case_csv)
+    if not yyyymm:
+        d0 = normalize_date(case_rows[0].get("年月日", ""))
+        ymd0 = to_yyyymmdd(d0)
+        yyyymm = ymd0[:6] if ymd0 else "YYYYMM"
+
+    name_for_file = (case_rows[0].get("氏名") or "").strip() or "名前未設定"
+    out_name = build_output_filename(name_for_file, yyyymm)
     out_path = outdir / out_name
 
     if out_path.exists():
-        msg = f"このフォルダーには『{out_name}』は存在します。上書きしますか？"
+        msg = f"このフォルダーには『{out_name}』が存在します。上書きしますか？"
         if not messagebox.askyesno("確認", msg):
             raise RuntimeError("キャンセルしました。")
 
@@ -372,21 +361,21 @@ def generate(user_csv: Path, case_csv: Path, outdir: Path) -> Path:
     except (InvalidFileException, Exception) as e:
         raise RuntimeError(f"テンプレ読み込み失敗: {e}")
 
-    remove_sample_sheets(wb)
+    # Sample系は消す
+    remove_sheets_by_predicate(wb, lambda n: "sample" in n.lower())
 
-    if TEMPLATE_SHEET not in wb.sheetnames:
-        raise RuntimeError(f"テンプレに '{TEMPLATE_SHEET}' シートがありません。")
-    tpl = wb[TEMPLATE_SHEET]
+    # テンプレシートを「実物で」特定
+    tpl_ws = pick_template_sheet(wb)
+    template_sheet_name = tpl_ws.title  # ←最後にこれを必ず削除する
 
     date_col = pick_date_column(daily_rows)
     daily_by_date: Dict[str, Dict[str, str]] = {}
     for r in daily_rows:
-        daily_by_date[normalize_date(r.get(date_col, ""))] = r
+        key = normalize_date(r.get(date_col, ""))
+        if key:
+            daily_by_date[key] = r
 
-    required = ["事業所名", "氏名", "年月日", "出欠等", "実績開始時間", "実績終了時間"]
-    for c in required:
-        if c not in case_rows[0]:
-            raise RuntimeError(f"caseMonth（caseDaily）に必須列がありません: {c}")
+    created = 0
 
     for r in case_rows:
         status = (r.get("出欠等", "") or "").strip()
@@ -395,29 +384,34 @@ def generate(user_csv: Path, case_csv: Path, outdir: Path) -> Path:
         if status != ATTEND_VALUE:
             continue
 
-        date = normalize_date(r.get("年月日", ""))
-        if not date:
+        date_norm = normalize_date(r.get("年月日", ""))
+        if not date_norm:
+            continue
+        yyyymmdd = to_yyyymmdd(date_norm)
+        if not yyyymmdd:
             continue
 
-        daily = daily_by_date.get(date, {})
+        daily = daily_by_date.get(date_norm, {})
 
-        sheet_base = f"{date.replace('/','')[:8]}_{(r.get('氏名','') or '').strip()}"
-        sheet_name = safe_sheet_name(sheet_base)
+        # ★出力シート名：yyyymmdd のみ（重複は _2, _3…）
+        sheet_name = yyyymmdd
         if sheet_name in wb.sheetnames:
             k = 2
             while True:
-                cand = safe_sheet_name(f"{sheet_base}_{k}")
+                cand = f"{yyyymmdd}_{k}"
                 if cand not in wb.sheetnames:
                     sheet_name = cand
                     break
                 k += 1
 
-        ws = wb.copy_worksheet(tpl)
+        ws = wb.copy_worksheet(tpl_ws)
         ws.title = sheet_name
 
+        person = (r.get("氏名", "") or "").strip()
+
         ws[CELL_MAP["office"]].value = r.get("事業所名", "")
-        ws[CELL_MAP["date"]].value = date
-        ws[CELL_MAP["user"]].value = r.get("氏名", "")
+        ws[CELL_MAP["date"]].value = date_norm
+        ws[CELL_MAP["user"]].value = person
 
         ws[CELL_MAP["time"]].value = format_time_range_jp(
             r.get("実績開始時間", ""),
@@ -426,13 +420,10 @@ def generate(user_csv: Path, case_csv: Path, outdir: Path) -> Path:
 
         method_cell = ws[CELL_MAP["method"]]
         method_cell.value = normalize_method(r.get("実績記録票備考欄", ""))
-        method_cell.alignment = Alignment(horizontal="center", vertical="center")
+        method_cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
 
         ws[CELL_MAP["program"]].value = build_program(daily)
-
         ws[CELL_MAP["dayreport"]].value = r.get("日報", "")
-        set_wrap_only(ws, CELL_MAP["dayreport"], horizontal_default="left", vertical_default="top")
-        set_row_height_px(ws, CELL_MAP["dayreport"], A11_HEIGHT_PX)
 
         temp = (daily.get("体温", "") or "").strip()
         ws[CELL_MAP["temp"]].value = "未検温" if temp == "" else f"{temp}℃"
@@ -440,12 +431,23 @@ def generate(user_csv: Path, case_csv: Path, outdir: Path) -> Path:
         daily_contact = pick_daily_contact_only(daily)
         cm_note = (r.get("備考") or r.get("実績記録票備考欄") or "").strip()
         raw_contact = daily_contact or cm_note
-
         ws[CELL_MAP["slack"]].value = format_contact_text(raw_contact)
-        set_wrap_only(ws, CELL_MAP["slack"], horizontal_default="left", vertical_default="top")
-        set_row_height_px(ws, CELL_MAP["slack"], A16_HEIGHT_PX)
 
-    remove_sample_sheets(wb)
+        created += 1
+
+    if created == 0:
+        raise RuntimeError("出力対象（出欠等=出席）が1件もありません。")
+
+    # ★最後にテンプレとFormat系を必ず削除
+    # 1) 実際に使ったテンプレシートを確実に削除
+    if template_sheet_name in wb.sheetnames:
+        del wb[template_sheet_name]
+
+    # 2) 念のため format を含むシートも削除（残っていたら消す）
+    remove_sheets_by_predicate(wb, lambda n: "format" in n.lower())
+
+    # 3) ついでに sample が残っていたら消す
+    remove_sheets_by_predicate(wb, lambda n: "sample" in n.lower())
 
     try:
         wb.save(out_path)
