@@ -17,26 +17,32 @@ CELL_MAP = {
     "office": "B3",
     "date": "B4",
     "user": "G4",
-    "time": "B5",
-    "method": "G5",
+    "time": "B5",          # 対応時間
+    "method": "G5",        # 対応手段（中央揃え）
     "program": "A9",
     "dayreport": "A11",
-    "temp": "A13",   # ★修正：A13 に反映
-    "slack": "A16",  # A16
+    "temp": "B13",
+    "slack": "A16",
 }
 
 ATTEND_VALUE = "出席"
 ABSENT_SKIP_VALUE = "欠席時対応"
+
+A11_HEIGHT_PX = 350
+A16_HEIGHT_PX = 500
 
 MSG_NOT_USERCASEDAILY = "userCaseDailyではありません。"
 MSG_NOT_CASE_MONTH_DAILY = "caseMonth（またはcaseDaily）ではありません。"
 MSG_NOT_CSV = "csvファイルではありません。"
 MSG_MONTH_MISMATCH = "userCaseDailyとcaseMonth（caseDaily）の年月が合いません。"
 MSG_CASE_NOT_SELECTED = "caseMonth（またはcaseDaily）が未選択です。"
-MSG_USER_NOT_SELECTED = "userCaseDailyが未選択です。"
 MSG_OUTDIR_NOT_SELECTED = "出力先が未選択です。"
 MSG_FILE_IN_USE = "ファイルにアクセスできません。別のプロセスが使用中です。"
-MSG_TEMPLATE_NOT_FOUND = "テンプレxlsxが見つかりません。"
+MSG_TEMPLATE_NOT_FOUND = "java.io.FileNotFoundException.Sample_Format.xlsx(指定されたファイルが見つかりません。)"
+
+
+def px_to_points(px: float) -> float:
+    return px * 0.75
 
 
 def get_base_folder() -> Path:
@@ -58,6 +64,11 @@ def looks_like_caseMonth_or_caseDaily(path: Path) -> bool:
     return ("caseMonth" in name) or ("caseDaily" in name)
 
 
+def extract_yyyymm_from_filename(path: Path) -> Optional[str]:
+    m = re.search(r"_(\d{6})", path.name)
+    return m.group(1) if m else None
+
+
 def detect_encoding(path: Path) -> str:
     for enc in ("cp932", "shift_jis", "utf-8-sig", "utf-8"):
         try:
@@ -66,96 +77,88 @@ def detect_encoding(path: Path) -> str:
             return enc
         except Exception:
             pass
-    raise RuntimeError("文字コード判定失敗")
+    raise RuntimeError(f"文字コード判定失敗: {path}")
 
 
 def read_csv_dicts(path: Path) -> List[Dict[str, str]]:
     enc = detect_encoding(path)
     with path.open("r", encoding=enc, newline="") as f:
         reader = csv.DictReader(f)
-        rows = []
+        rows: List[Dict[str, str]] = []
         for r in reader:
             rows.append({(k or "").strip(): (v or "").strip() for k, v in r.items()})
         return rows
 
 
 def normalize_date(s: str) -> str:
-    s = (s or "").strip()
-    if not s:
-        return ""
-    m = re.match(r"^(\d{4})[/-](\d{1,2})[/-](\d{1,2})$", s)
-    if m:
-        return f"{int(m.group(1))}/{int(m.group(2))}/{int(m.group(3))}"
-    return s.replace("-", "/")
+    return (s or "").strip().replace("-", "/")
 
 
-def to_yyyymmdd(date_norm: str) -> str:
-    m = re.match(r"^(\d{4})/(\d{1,2})/(\d{1,2})$", date_norm)
-    if not m:
-        return ""
-    return f"{int(m.group(1))}{int(m.group(2)):02d}{int(m.group(3)):02d}"
+def safe_sheet_name(name: str) -> str:
+    for c in [":", "/", "\\", "?", "*", "[", "]"]:
+        name = name.replace(c, "_")
+    return name.strip()[:31]
 
 
 def parse_time_flexible(s: str) -> Optional[Tuple[int, int]]:
     s = (s or "").strip()
     if not s:
         return None
-    m = re.search(r"(\d{1,2}):(\d{2})", s)
-    if m:
-        return int(m.group(1)), int(m.group(2))
-    m = re.search(r"(\d{1,2})時(\d{1,2})分", s)
-    if m:
-        return int(m.group(1)), int(m.group(2))
+
+    patterns = [
+        r"(\d{1,2}):(\d{2})(?::\d{2})?",
+        r"(\d{1,2})時(\d{1,2})分",
+    ]
+    for pat in patterns:
+        m = re.search(pat, s)
+        if m:
+            h = int(m.group(1))
+            mi = int(m.group(2))
+            if 0 <= h <= 23 and 0 <= mi <= 59:
+                return (h, mi)
     return None
 
 
 def format_time_range_jp(start: str, end: str) -> str:
     ps = parse_time_flexible(start)
     pe = parse_time_flexible(end)
+
     if ps and pe:
-        return f"{ps[0]}時{ps[1]:02d}分～{pe[0]}時{pe[1]:02d}分"
-    return ""
+        sh, sm = ps
+        eh, em = pe
+        return f"{sh}時{sm:02d}分～{eh}時{em:02d}分"
+
+    def fmt_one(p: Optional[Tuple[int, int]], raw: str) -> str:
+        if p:
+            h, m = p
+            return f"{h}時{m:02d}分"
+        return (raw or "").strip()
+
+    left = fmt_one(ps, start)
+    right = fmt_one(pe, end)
+
+    if not left and not right:
+        return ""
+    if left and right:
+        return f"{left}～{right}"
+    return left or right
 
 
-def pick_date_column(daily_rows):
-    for c in ["日付", "年月日", "支援実施日"]:
-        if c in daily_rows[0]:
+def remove_sample_sheets(wb) -> None:
+    targets = [name for name in wb.sheetnames if "sample" in name.lower()]
+    for name in targets:
+        del wb[name]
+
+
+def pick_date_column(daily_rows: List[Dict[str, str]]) -> str:
+    candidates = ["日付", "年月日", "支援実施日"]
+    keys = list(daily_rows[0].keys())
+    for c in candidates:
+        if c in keys:
             return c
-    return list(daily_rows[0].keys())[0]
+    return keys[0]
 
 
-def build_program(d):
-    parts = []
-    keys = [
-        ("午前のプログラム", "午前のプログラム詳細"),
-        ("午後1のプログラム", "午後1のプログラム詳細"),
-        ("午後2のプログラム", "午後2のプログラム詳細"),
-        ("終日のプログラム", "終日のプログラム詳細"),
-    ]
-    for k1, k2 in keys:
-        p = (d.get(k1) or "").strip()
-        d2 = (d.get(k2) or "").strip()
-        if p or d2:
-            parts.append(p + ("\n" + d2 if p and d2 else d2))
-    return "\n".join(parts)
-
-
-# ===== 追加（変更点1：Sample削除） =====
-def remove_sample_sheets(wb):
-    targets = [n for n in wb.sheetnames if "sample" in n.lower()]
-    for n in targets:
-        del wb[n]
-
-
-# ===== 追加（変更点2：G5 正規化＋中央揃え） =====
-def normalize_method(raw: str) -> str:
-    raw = raw or ""
-    if "在宅" in raw and "通所" not in raw:
-        return "利用者宅"
-    return "事業所"
-
-
-# ===== 追加（変更点3：A16 整形） =====
 def pick_daily_contact_only(daily: Dict[str, str]) -> str:
     candidates = [
         "本人との連絡",
@@ -171,25 +174,44 @@ def pick_daily_contact_only(daily: Dict[str, str]) -> str:
     return ""
 
 
+def build_program(d: Dict[str, str]) -> str:
+    out: List[str] = []
+
+    def add(p, detail):
+        p = (p or "").strip()
+        detail = (detail or "").strip()
+        if p or detail:
+            out.append(p + ("\n" + detail if (p and detail) else detail))
+
+    add(d.get("午前のプログラム", ""), d.get("午前のプログラム詳細", ""))
+    add(d.get("午後1のプログラム", ""), d.get("午後1のプログラム詳細", ""))
+    add(d.get("午後2のプログラム", ""), d.get("午後2のプログラム詳細", ""))
+    add(d.get("終日のプログラム", ""), d.get("終日のプログラム詳細", ""))
+    return "\n".join(out)
+
+
+def normalize_method(raw: str) -> str:
+    raw = raw or ""
+    if "在宅" in raw and "通所" not in raw:
+        return "利用者宅"
+    return "事業所"
+
+
 def format_contact_text(raw: str) -> str:
-    """
-    - HH:MM または「hh時間前」で分割して改行
-    - 本文は30文字超なら省略
-    """
     text = (raw or "").strip()
     if not text:
         return ""
 
-    token_pat = r"(\b\d{1,2}:\d{2}\b|\b\d{1,2}時間前\b)"
-    parts = re.split(token_pat, text)
+    parts = re.split(r"(\b\d{1,2}:\d{2}\b)", text)
     if len(parts) == 1:
-        return (text[:30] + "・・・・") if len(text) > 30 else text
+        body = text
+        return (body[:30] + "・・・・") if len(body) > 30 else body
 
     lines: List[str] = []
     i = 0
     while i < len(parts):
-        seg = parts[i] or ""
-        if re.fullmatch(r"\b\d{1,2}:\d{2}\b|\b\d{1,2}時間前\b", seg):
+        seg = parts[i]
+        if re.fullmatch(r"\b\d{1,2}:\d{2}\b", seg or ""):
             t = seg
             msg = (parts[i + 1] if i + 1 < len(parts) else "").strip()
             if len(msg) > 30:
@@ -202,134 +224,237 @@ def format_contact_text(raw: str) -> str:
     return "\n".join([ln for ln in lines if ln])
 
 
-def ask_paths():
+def set_wrap_only(ws, addr: str, horizontal_default="left", vertical_default="top"):
+    cell = ws[addr]
+    a = cell.alignment if cell.alignment else Alignment()
+    ws[addr].alignment = Alignment(
+        horizontal=a.horizontal if a.horizontal else horizontal_default,
+        vertical=a.vertical if a.vertical else vertical_default,
+        text_rotation=a.text_rotation,
+        wrap_text=True,
+        shrinkToFit=False,
+        indent=a.indent,
+    )
+
+
+def set_row_height_px(ws, addr: str, height_px: float):
+    row = ws[addr].row
+    ws.row_dimensions[row].height = px_to_points(height_px)
+
+
+# ★追加：B13が結合セルの場合、結合範囲内のテンプレ文言を丸ごと消す（B13だけ対象）
+def clear_merged_area_value(ws, addr: str) -> None:
+    target = addr.upper()
+    for rng in ws.merged_cells.ranges:
+        # rng 例: 'B13:J13'
+        if target in str(rng).upper():
+            # 結合範囲内を一旦全部クリア（トップ左以外はMergedCellでset不可なので例外回避）
+            min_row = rng.min_row
+            max_row = rng.max_row
+            min_col = rng.min_col
+            max_col = rng.max_col
+            for r in range(min_row, max_row + 1):
+                for c in range(min_col, max_col + 1):
+                    try:
+                        ws.cell(r, c).value = None
+                    except Exception:
+                        pass
+            return
+    # 結合じゃない場合も、最低限そのセルは消す
+    ws[addr].value = None
+
+
+def ask_paths() -> Tuple[Optional[Path], Optional[Path], Optional[Path]]:
     root = tk.Tk()
     root.withdraw()
 
-    user = filedialog.askopenfilename(title="userCaseDailyを選択", filetypes=[("CSV", "*.csv")])
-    if not user:
-        messagebox.showerror("エラー", MSG_USER_NOT_SELECTED)
+    user_path_str = filedialog.askopenfilename(
+        title="userCaseDailyを選択",
+        filetypes=[("CSV", "*.csv"), ("All files", "*.*")]
+    )
+    if not user_path_str:
         return None, None, None
-    user_path = Path(user)
+    user_path = Path(user_path_str)
 
-    case = filedialog.askopenfilename(title="caseMonthを選択", filetypes=[("CSV", "*.csv")])
-    if not case:
+    if not is_csv(user_path):
+        messagebox.showerror("エラー", MSG_NOT_CSV)
+        return None, None, None
+    if not looks_like_userCaseDaily(user_path):
+        messagebox.showerror("エラー", MSG_NOT_USERCASEDAILY)
+        return None, None, None
+
+    case_path_str = filedialog.askopenfilename(
+        title="caseMonth（またはcaseDaily）を選択",
+        filetypes=[("CSV", "*.csv"), ("All files", "*.*")]
+    )
+    if not case_path_str:
         messagebox.showerror("エラー", MSG_CASE_NOT_SELECTED)
         return None, None, None
-    case_path = Path(case)
+    case_path = Path(case_path_str)
 
-    out = filedialog.askdirectory(title="出力先を選択")
-    if not out:
-        messagebox.showerror("エラー", MSG_OUTDIR_NOT_SELECTED)
+    if not is_csv(case_path):
+        messagebox.showerror("エラー", MSG_NOT_CSV)
+        return None, None, None
+    if not looks_like_caseMonth_or_caseDaily(case_path):
+        messagebox.showerror("エラー", MSG_NOT_CASE_MONTH_DAILY)
         return None, None, None
 
-    return user_path, case_path, Path(out)
+    outdir_str = filedialog.askdirectory(title="出力先フォルダを選択")
+    if not outdir_str:
+        messagebox.showerror("エラー", MSG_OUTDIR_NOT_SELECTED)
+        return None, None, None
+    outdir = Path(outdir_str)
+
+    return user_path, case_path, outdir
 
 
-def load_template(base):
-    for p in base.glob("*.xlsx"):
-        return p
-    raise FileNotFoundError(MSG_TEMPLATE_NOT_FOUND)
+def ensure_same_month(user_path: Path, case_path: Path) -> None:
+    u = extract_yyyymm_from_filename(user_path)
+    c = extract_yyyymm_from_filename(case_path)
+    if u and c and (u != c):
+        raise ValueError(MSG_MONTH_MISMATCH)
 
 
-def generate(user_csv: Path, case_csv: Path, outdir: Path):
+def build_output_filename(case_rows: List[Dict[str, str]], yyyymm: Optional[str]) -> str:
+    name = (case_rows[0].get("氏名") or "").strip() or "名前未設定"
+    if not yyyymm:
+        d = normalize_date(case_rows[0].get("年月日", ""))
+        m = re.match(r"^(\d{4})/(\d{1,2})", d)
+        yyyymm = f"{m.group(1)}{int(m.group(2)):02d}" if m else "YYYYMM"
+    return f"{name}_{yyyymm}_サービス支援記録.xlsx"
+
+
+def load_template_or_fail(base: Path) -> Path:
+    tpl = base / "Sample_Format.xlsx"
+    if not tpl.exists():
+        raise FileNotFoundError(MSG_TEMPLATE_NOT_FOUND)
+    return tpl
+
+
+def generate(user_csv: Path, case_csv: Path, outdir: Path) -> Path:
+    base = get_base_folder()
+    template_path = load_template_or_fail(base)
+
+    ensure_same_month(user_csv, case_csv)
 
     case_rows = read_csv_dicts(case_csv)
     daily_rows = read_csv_dicts(user_csv)
-
     if not case_rows:
-        raise RuntimeError("caseMonthが空です")
+        raise RuntimeError("caseMonth（caseDaily）が空です。")
+    if not daily_rows:
+        raise RuntimeError("userCaseDailyが空です。")
 
-    # ===== 出力ファイル名確定（変更しない） =====
-    first_attend = None
-    for r in case_rows:
-        if (r.get("出欠等") or "").strip() == ATTEND_VALUE:
-            first_attend = r
-            break
-
-    if first_attend is None:
-        raise RuntimeError("出席データがありません")
-
-    name_for_file = (first_attend.get("氏名") or "").strip()
-    if not name_for_file:
-        name_for_file = "名前未設定"
-
-    d0 = normalize_date(first_attend.get("年月日", ""))
-    ymd0 = to_yyyymmdd(d0)
-    yyyymm = ymd0[:6] if ymd0 else "YYYYMM"
-
-    out_name = f"{name_for_file}_{yyyymm}_サービス支援記録.xlsx"
+    yyyymm = extract_yyyymm_from_filename(case_csv) or extract_yyyymm_from_filename(user_csv)
+    out_name = build_output_filename(case_rows, yyyymm)
     out_path = outdir / out_name
-    # ============================
 
-    template_path = load_template(get_base_folder())
-    wb = load_workbook(template_path)
+    if out_path.exists():
+        msg = f"このフォルダーには’{out_name}’は存在します。上書きしますか？"
+        if not messagebox.askyesno("確認", msg):
+            raise RuntimeError("キャンセルしました。")
 
-    # ★修正：Sample を削除
+    try:
+        wb = load_workbook(template_path)
+    except (InvalidFileException, Exception) as e:
+        raise RuntimeError(f"テンプレ読み込み失敗: {e}")
+
     remove_sample_sheets(wb)
 
+    if TEMPLATE_SHEET not in wb.sheetnames:
+        raise RuntimeError(f"テンプレに '{TEMPLATE_SHEET}' シートがありません。")
     tpl = wb[TEMPLATE_SHEET]
 
     date_col = pick_date_column(daily_rows)
-    daily_by_date = {normalize_date(r.get(date_col, "")): r for r in daily_rows}
+    daily_by_date: Dict[str, Dict[str, str]] = {}
+    for r in daily_rows:
+        daily_by_date[normalize_date(r.get(date_col, ""))] = r
+
+    required = ["事業所名", "氏名", "年月日", "出欠等", "実績開始時間", "実績終了時間"]
+    for c in required:
+        if c not in case_rows[0]:
+            raise RuntimeError(f"caseMonth（caseDaily）に必須列がありません: {c}")
 
     for r in case_rows:
-        if (r.get("出欠等") or "").strip() != ATTEND_VALUE:
+        status = (r.get("出欠等", "") or "").strip()
+        if status == ABSENT_SKIP_VALUE:
+            continue
+        if status != ATTEND_VALUE:
             continue
 
-        date_norm = normalize_date(r.get("年月日", ""))
-        yyyymmdd = to_yyyymmdd(date_norm)
-        if not yyyymmdd:
+        date = normalize_date(r.get("年月日", ""))
+        if not date:
             continue
+
+        daily = daily_by_date.get(date, {})
+
+        sheet_base = f"{date.replace('/','')[:8]}_{(r.get('氏名','') or '').strip()}"
+        sheet_name = safe_sheet_name(sheet_base)
+        if sheet_name in wb.sheetnames:
+            k = 2
+            while True:
+                cand = safe_sheet_name(f"{sheet_base}_{k}")
+                if cand not in wb.sheetnames:
+                    sheet_name = cand
+                    break
+                k += 1
 
         ws = wb.copy_worksheet(tpl)
-        ws.title = yyyymmdd
-
-        daily = daily_by_date.get(date_norm, {})
+        ws.title = sheet_name
 
         ws[CELL_MAP["office"]].value = r.get("事業所名", "")
-        ws[CELL_MAP["date"]].value = date_norm
+        ws[CELL_MAP["date"]].value = date
         ws[CELL_MAP["user"]].value = r.get("氏名", "")
+
         ws[CELL_MAP["time"]].value = format_time_range_jp(
             r.get("実績開始時間", ""),
             r.get("実績終了時間", "")
         )
 
-        # ★修正：G5 を正規化＋中央揃え
         method_cell = ws[CELL_MAP["method"]]
         method_cell.value = normalize_method(r.get("実績記録票備考欄", ""))
-        method_cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        method_cell.alignment = Alignment(horizontal="center", vertical="center")
 
         ws[CELL_MAP["program"]].value = build_program(daily)
+
         ws[CELL_MAP["dayreport"]].value = r.get("日報", "")
+        set_wrap_only(ws, CELL_MAP["dayreport"], horizontal_default="left", vertical_default="top")
+        set_row_height_px(ws, CELL_MAP["dayreport"], A11_HEIGHT_PX)
 
-        # ★修正：A13（体温）を反映（未検温/℃）
-        temp_raw = (daily.get("体温", "") or "").strip()
-        ws[CELL_MAP["temp"]].value = "未検温" if temp_raw == "" else f"{temp_raw}℃"
+        # ===== ここだけ修正（B13の不要文言を確実に消す）=====
+        clear_merged_area_value(ws, CELL_MAP["temp"])
+        temp = (daily.get("体温", "") or "").strip()
+        ws[CELL_MAP["temp"]].value = "未検温" if temp == "" else f"{temp}℃"
+        # ==================================================
 
-        # ★修正：A16（本人との連絡）を反映（userCaseDaily優先→caseMonth備考、整形）
         daily_contact = pick_daily_contact_only(daily)
         cm_note = (r.get("備考") or r.get("実績記録票備考欄") or "").strip()
         raw_contact = daily_contact or cm_note
+
         ws[CELL_MAP["slack"]].value = format_contact_text(raw_contact)
+        set_wrap_only(ws, CELL_MAP["slack"], horizontal_default="left", vertical_default="top")
+        set_row_height_px(ws, CELL_MAP["slack"], A16_HEIGHT_PX)
 
-    # Format削除（変更しない）
-    del wb[TEMPLATE_SHEET]
-
-    # ★修正：保存前にもう一度 Sample 削除（保険）
     remove_sample_sheets(wb)
 
-    wb.save(out_path)
+    try:
+        wb.save(out_path)
+    except PermissionError:
+        raise PermissionError(MSG_FILE_IN_USE)
+
     return out_path
 
 
 def main():
+    root = tk.Tk()
+    root.withdraw()
+
     user_path, case_path, outdir = ask_paths()
-    if not user_path:
+    if user_path is None and case_path is None and outdir is None:
         return
+
     try:
         out_path = generate(user_path, case_path, outdir)
-        messagebox.showinfo("完了", f"保存しました\n{out_path}")
+        messagebox.showinfo("完了", f"保存しました。\n{out_path}")
     except Exception as e:
         messagebox.showerror("エラー", str(e))
 
