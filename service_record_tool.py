@@ -21,8 +21,8 @@ CELL_MAP = {
     "method": "G5",
     "program": "A9",
     "dayreport": "A11",
-    "temp": "B13",
-    "slack": "A16",
+    "temp": "A13",   # ★修正：A13 に反映
+    "slack": "A16",  # A16
 }
 
 ATTEND_VALUE = "出席"
@@ -140,6 +140,68 @@ def build_program(d):
     return "\n".join(parts)
 
 
+# ===== 追加（変更点1：Sample削除） =====
+def remove_sample_sheets(wb):
+    targets = [n for n in wb.sheetnames if "sample" in n.lower()]
+    for n in targets:
+        del wb[n]
+
+
+# ===== 追加（変更点2：G5 正規化＋中央揃え） =====
+def normalize_method(raw: str) -> str:
+    raw = raw or ""
+    if "在宅" in raw and "通所" not in raw:
+        return "利用者宅"
+    return "事業所"
+
+
+# ===== 追加（変更点3：A16 整形） =====
+def pick_daily_contact_only(daily: Dict[str, str]) -> str:
+    candidates = [
+        "本人との連絡",
+        "本人との連絡（チャット）",
+        "本人との連絡（Slack）",
+        "連絡事項",
+        "連絡",
+    ]
+    for c in candidates:
+        v = (daily.get(c) or "").strip()
+        if v:
+            return v
+    return ""
+
+
+def format_contact_text(raw: str) -> str:
+    """
+    - HH:MM または「hh時間前」で分割して改行
+    - 本文は30文字超なら省略
+    """
+    text = (raw or "").strip()
+    if not text:
+        return ""
+
+    token_pat = r"(\b\d{1,2}:\d{2}\b|\b\d{1,2}時間前\b)"
+    parts = re.split(token_pat, text)
+    if len(parts) == 1:
+        return (text[:30] + "・・・・") if len(text) > 30 else text
+
+    lines: List[str] = []
+    i = 0
+    while i < len(parts):
+        seg = parts[i] or ""
+        if re.fullmatch(r"\b\d{1,2}:\d{2}\b|\b\d{1,2}時間前\b", seg):
+            t = seg
+            msg = (parts[i + 1] if i + 1 < len(parts) else "").strip()
+            if len(msg) > 30:
+                msg = msg[:30] + "・・・・"
+            lines.append(f"{t} {msg}".rstrip())
+            i += 2
+        else:
+            i += 1
+
+    return "\n".join([ln for ln in lines if ln])
+
+
 def ask_paths():
     root = tk.Tk()
     root.withdraw()
@@ -178,7 +240,7 @@ def generate(user_csv: Path, case_csv: Path, outdir: Path):
     if not case_rows:
         raise RuntimeError("caseMonthが空です")
 
-    # ===== 出力ファイル名確定 =====
+    # ===== 出力ファイル名確定（変更しない） =====
     first_attend = None
     for r in case_rows:
         if (r.get("出欠等") or "").strip() == ATTEND_VALUE:
@@ -202,6 +264,10 @@ def generate(user_csv: Path, case_csv: Path, outdir: Path):
 
     template_path = load_template(get_base_folder())
     wb = load_workbook(template_path)
+
+    # ★修正：Sample を削除
+    remove_sample_sheets(wb)
+
     tpl = wb[TEMPLATE_SHEET]
 
     date_col = pick_date_column(daily_rows)
@@ -228,13 +294,30 @@ def generate(user_csv: Path, case_csv: Path, outdir: Path):
             r.get("実績開始時間", ""),
             r.get("実績終了時間", "")
         )
-        ws[CELL_MAP["method"]].value = r.get("実績記録票備考欄", "")
+
+        # ★修正：G5 を正規化＋中央揃え
+        method_cell = ws[CELL_MAP["method"]]
+        method_cell.value = normalize_method(r.get("実績記録票備考欄", ""))
+        method_cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+
         ws[CELL_MAP["program"]].value = build_program(daily)
         ws[CELL_MAP["dayreport"]].value = r.get("日報", "")
-        ws[CELL_MAP["temp"]].value = daily.get("体温", "")
-        ws[CELL_MAP["slack"]].value = daily.get("本人との連絡", "")
 
+        # ★修正：A13（体温）を反映（未検温/℃）
+        temp_raw = (daily.get("体温", "") or "").strip()
+        ws[CELL_MAP["temp"]].value = "未検温" if temp_raw == "" else f"{temp_raw}℃"
+
+        # ★修正：A16（本人との連絡）を反映（userCaseDaily優先→caseMonth備考、整形）
+        daily_contact = pick_daily_contact_only(daily)
+        cm_note = (r.get("備考") or r.get("実績記録票備考欄") or "").strip()
+        raw_contact = daily_contact or cm_note
+        ws[CELL_MAP["slack"]].value = format_contact_text(raw_contact)
+
+    # Format削除（変更しない）
     del wb[TEMPLATE_SHEET]
+
+    # ★修正：保存前にもう一度 Sample 削除（保険）
+    remove_sample_sheets(wb)
 
     wb.save(out_path)
     return out_path
