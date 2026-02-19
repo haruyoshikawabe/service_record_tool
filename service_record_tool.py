@@ -21,8 +21,8 @@ CELL_MAP = {
     "method": "G5",
     "program": "A9",
     "dayreport": "A11",
-    "temp": "B13",  # ★修正：B13 に反映（テンプレの不要文言を上書きして消す）
-    "slack": "A16",  # A16
+    "temp": "B13",
+    "slack": "A16",
 }
 
 ATTEND_VALUE = "出席"
@@ -140,14 +140,12 @@ def build_program(d):
     return "\n".join(parts)
 
 
-# ===== 追加（変更点1：Sample削除） =====
 def remove_sample_sheets(wb):
     targets = [n for n in wb.sheetnames if "sample" in n.lower()]
     for n in targets:
         del wb[n]
 
 
-# ===== 追加（変更点2：G5 正規化＋中央揃え） =====
 def normalize_method(raw: str) -> str:
     raw = raw or ""
     if "在宅" in raw and "通所" not in raw:
@@ -155,7 +153,6 @@ def normalize_method(raw: str) -> str:
     return "事業所"
 
 
-# ===== 追加（変更点3：A16 整形） =====
 def pick_daily_contact_only(daily: Dict[str, str]) -> str:
     candidates = [
         "本人との連絡",
@@ -172,10 +169,6 @@ def pick_daily_contact_only(daily: Dict[str, str]) -> str:
 
 
 def format_contact_text(raw: str) -> str:
-    """
-    - HH:MM または「hh時間前」で分割して改行
-    - 本文は30文字超なら省略
-    """
     text = (raw or "").strip()
     if not text:
         return ""
@@ -240,7 +233,6 @@ def generate(user_csv: Path, case_csv: Path, outdir: Path):
     if not case_rows:
         raise RuntimeError("caseMonthが空です")
 
-    # ===== 出力ファイル名確定（変更しない） =====
     first_attend = None
     for r in case_rows:
         if (r.get("出欠等") or "").strip() == ATTEND_VALUE:
@@ -260,12 +252,10 @@ def generate(user_csv: Path, case_csv: Path, outdir: Path):
 
     out_name = f"{name_for_file}_{yyyymm}_サービス支援記録.xlsx"
     out_path = outdir / out_name
-    # ============================
 
     template_path = load_template(get_base_folder())
     wb = load_workbook(template_path)
 
-    # ★修正：Sample を削除
     remove_sample_sheets(wb)
 
     tpl = wb[TEMPLATE_SHEET]
@@ -295,7 +285,6 @@ def generate(user_csv: Path, case_csv: Path, outdir: Path):
             r.get("実績終了時間", "")
         )
 
-        # ★修正：G5 を正規化＋中央揃え
         method_cell = ws[CELL_MAP["method"]]
         method_cell.value = normalize_method(r.get("実績記録票備考欄", ""))
         method_cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
@@ -303,23 +292,23 @@ def generate(user_csv: Path, case_csv: Path, outdir: Path):
         ws[CELL_MAP["program"]].value = build_program(daily)
         ws[CELL_MAP["dayreport"]].value = r.get("日報", "")
 
-        # ★修正：B13（体温）を反映（未検温/℃） ← CELL_MAP["temp"] で B13 を指す
         temp_raw = (daily.get("体温", "") or "").strip()
         ws[CELL_MAP["temp"]].value = "未検温" if temp_raw == "" else f"{temp_raw}℃"
 
-        # ★修正：A16（本人との連絡）を反映（userCaseDaily優先→caseMonth備考、整形）
         daily_contact = pick_daily_contact_only(daily)
         cm_note = (r.get("備考") or r.get("実績記録票備考欄") or "").strip()
         raw_contact = daily_contact or cm_note
         ws[CELL_MAP["slack"]].value = format_contact_text(raw_contact)
 
-    # Format削除（変更しない）
     del wb[TEMPLATE_SHEET]
-
-    # ★修正：保存前にもう一度 Sample 削除（保険）
     remove_sample_sheets(wb)
 
-    wb.save(out_path)
+    # ★ここだけ追加
+    try:
+        wb.save(out_path)
+    except PermissionError:
+        raise PermissionError(MSG_FILE_IN_USE)
+
     return out_path
 
 
